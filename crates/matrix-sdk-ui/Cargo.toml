@@ -47,7 +47,7 @@ futures-util.workspace = true
 fuzzy-matcher = "0.3.7"
 growable-bloom-filter.workspace = true
 imbl = { workspace = true, features = ["serde"] }
-indexmap.workspace = true
+indexmap = { workspace = true, features = ["serde"]}
 itertools.workspace = true
 matrix-sdk = { workspace = true, features = ["e2e-encryption"] }
 matrix-sdk-base.workspace = true
@@ -62,6 +62,7 @@ thiserror.workspace = true
 tokio.workspace = true
 tokio-stream = { workspace = true, features = ["sync"] }
 tracing = { workspace = true, features = ["attributes"] }
+ts-rs = { workspace = true, features = ["indexmap-impl", "serde-json-impl"] }
 unicode-normalization.workspace = true
 uniffi = { workspace = true, optional = true }
 

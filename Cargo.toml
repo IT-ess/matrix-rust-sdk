@@ -68,7 +68,7 @@ rand = "0.8.5"
 regex = "1.12.2"
 reqwest = { version = "0.12.24", default-features = false }
 rmp-serde = "1.3.0"
-ruma = { git = "https://github.com/ruma/ruma", rev = "a5e8208d76d5fd7f82b04b7c86f877651d228b9a", features = [
+ruma = { git = "https://github.com/IT-ess/ruma", branch = "ts-rs", features = [
     "client-api-c",
     "compat-upload-signatures",
     "compat-arbitrary-length-ids",
@@ -106,6 +106,7 @@ tracing = { version = "0.1.41", default-features = false, features = ["std"] }
 tracing-appender = "0.2.3"
 tracing-core = "0.1.34"
 tracing-subscriber = "0.3.20"
+ts-rs = "11.1.0"
 unicode-normalization = "0.1.25"
 uniffi = { git = "https://github.com/mozilla/uniffi-rs", rev = "870b814" }
 uniffi_bindgen = { git = "https://github.com/mozilla/uniffi-rs", rev = "870b814" }

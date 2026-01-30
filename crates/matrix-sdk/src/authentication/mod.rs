@@ -188,7 +188,7 @@ pub enum AuthApi {
 }
 
 /// A user session using one of the available authentication APIs.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum AuthSession {
     /// A session using the native Matrix authentication API.

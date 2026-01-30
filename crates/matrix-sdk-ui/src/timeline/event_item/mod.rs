@@ -33,6 +33,8 @@ use ruma::{
     room_version_rules::RedactionRules,
     serde::Raw,
 };
+use serde::Serialize;
+use ts_rs::TS;
 use unicode_segmentation::UnicodeSegmentation;
 
 mod content;
@@ -98,7 +100,7 @@ pub(super) enum EventTimelineItemKind {
 }
 
 /// A wrapper that can contain either a transaction id, or an event id.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq, TS)]
 pub enum TimelineEventItemId {
     /// The item is local, identified by its transaction id (to be used in
     /// subsequent requests).
@@ -680,11 +682,26 @@ pub enum ReactionStatus {
     RemoteToRemote(OwnedEventId),
 }
 
+impl Serialize for ReactionStatus {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let tag = match self {
+            Self::LocalToLocal(_) => "localToLocal",
+            Self::LocalToRemote(_) => "localToRemote",
+            Self::RemoteToRemote(_) => "remoteToRemote",
+        };
+        serializer.serialize_str(tag)
+    }
+}
+
 /// Information about a single reaction stored in [`ReactionsByKeyBySender`].
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, TS)]
 pub struct ReactionInfo {
     pub timestamp: MilliSecondsSinceUnixEpoch,
     /// Current status of this reaction.
+    #[ts(type = "string")]
     pub status: ReactionStatus,
 }
 
@@ -692,7 +709,7 @@ pub struct ReactionInfo {
 ///
 /// This representation makes sure that a given sender has sent at most one
 /// reaction for an event.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, TS)]
 pub struct ReactionsByKeyBySender(IndexMap<String, IndexMap<OwnedUserId, ReactionInfo>>);
 
 impl Deref for ReactionsByKeyBySender {

@@ -22,6 +22,7 @@ use ruma::{
 };
 use serde::{Deserialize, Serialize};
 use tracing::{debug, trace, warn};
+use ts_rs::TS;
 
 use super::{Room, RoomMemberships};
 use crate::{
@@ -388,7 +389,7 @@ impl RoomSummary {
 }
 
 /// Information about a member considered to be a room hero.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
 pub struct RoomHero {
     /// The user id of the hero.
     pub user_id: OwnedUserId,
@@ -408,7 +409,7 @@ const NUM_HEROES: usize = 5;
 
 /// The name of the room, either from the metadata or calculated
 /// according to [matrix specification](https://matrix.org/docs/spec/client_server/latest#calculating-the-display-name-for-a-room)
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, TS)]
 pub enum RoomDisplayName {
     /// The room has been named explicitly as
     Named(String),

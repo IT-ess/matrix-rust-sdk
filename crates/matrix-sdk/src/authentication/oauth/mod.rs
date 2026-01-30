@@ -1706,7 +1706,7 @@ impl<'a> GrantLoginWithQrCodeBuilder<'a> {
     }
 }
 /// A full session for the OAuth 2.0 API.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OAuthSession {
     /// The client ID obtained after registration.
     pub client_id: ClientId,
