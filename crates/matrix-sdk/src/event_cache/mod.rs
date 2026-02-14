@@ -30,11 +30,11 @@
 use std::{
     collections::{BTreeMap, HashMap},
     fmt,
+    ops::{Deref, DerefMut},
     sync::{Arc, OnceLock, Weak},
 };
 
 use eyeball::{SharedObservable, Subscriber};
-use eyeball_im::VectorDiff;
 use futures_util::future::{join_all, try_join_all};
 use matrix_sdk_base::{
     ThreadingSupport,
@@ -71,16 +71,19 @@ use crate::{
     send_queue::{LocalEchoContent, RoomSendQueueUpdate, SendQueueUpdate},
 };
 
+mod caches;
 mod deduplicator;
 mod pagination;
+mod persistence;
 #[cfg(feature = "e2e-encryption")]
 mod redecryptor;
 mod room;
 
+pub use caches::TimelineVectorDiffs;
 pub use pagination::{RoomPagination, RoomPaginationStatus};
 #[cfg(feature = "e2e-encryption")]
 pub use redecryptor::{DecryptionRetryRequest, RedecryptorReport};
-pub use room::{RoomEventCache, RoomEventCacheSubscriber, ThreadEventCacheUpdate};
+pub use room::{RoomEventCache, RoomEventCacheSubscriber};
 
 /// An error observed in the [`EventCache`].
 #[derive(thiserror::Error, Debug)]
@@ -128,6 +131,12 @@ pub enum EventCacheError {
     /// [`LinkedChunk`]: matrix_sdk_common::linked_chunk::LinkedChunk
     #[error(transparent)]
     LinkedChunkLoader(#[from] LazyLoaderError),
+
+    /// An error happened when trying to load pinned events; none of them could
+    /// be loaded, which would otherwise result in an empty pinned events
+    /// list, incorrectly.
+    #[error("Unable to load any of the pinned events.")]
+    UnableToLoadPinnedEvents,
 
     /// An error happened when reading the metadata of a linked chunk, upon
     /// reload.
@@ -224,6 +233,7 @@ impl EventCache {
         Self {
             inner: Arc::new(EventCacheInner {
                 client: weak_client,
+                config: RwLock::new(EventCacheConfig::default()),
                 store: event_cache_store,
                 multiple_room_updates_lock: Default::default(),
                 by_room: Default::default(),
@@ -239,6 +249,17 @@ impl EventCache {
                 thread_subscriber_receiver,
             }),
         }
+    }
+
+    /// Get a read-only handle to the global configuration of the
+    /// [`EventCache`].
+    pub async fn config(&self) -> impl Deref<Target = EventCacheConfig> + '_ {
+        self.inner.config.read().await
+    }
+
+    /// Get a writable handle to the global configuration of the [`EventCache`].
+    pub async fn config_mut(&self) -> impl DerefMut<Target = EventCacheConfig> + '_ {
+        self.inner.config.write().await
     }
 
     /// Subscribes to updates that a thread subscription has been sent.
@@ -434,10 +455,10 @@ impl EventCache {
                         // so let's do it!
                         if !diffs.is_empty() {
                             let _ = room.inner.update_sender.send(
-                                RoomEventCacheUpdate::UpdateTimelineEvents {
+                                RoomEventCacheUpdate::UpdateTimelineEvents(TimelineVectorDiffs {
                                     diffs,
                                     origin: EventsOrigin::Cache,
-                                },
+                                }),
                             );
                         }
                     } else {
@@ -819,10 +840,41 @@ impl EventCache {
     }
 }
 
+/// Global configuration for the [`EventCache`], applied to every single room.
+#[derive(Clone, Copy, Debug)]
+pub struct EventCacheConfig {
+    /// Maximum number of concurrent /event requests when loading pinned events.
+    pub max_pinned_events_concurrent_requests: usize,
+
+    /// Maximum number of pinned events to load, for any room.
+    pub max_pinned_events_to_load: usize,
+}
+
+impl EventCacheConfig {
+    /// The default maximum number of pinned events to load.
+    const DEFAULT_MAX_EVENTS_TO_LOAD: usize = 128;
+
+    /// The default maximum number of concurrent requests to perform when
+    /// loading the pinned events.
+    const DEFAULT_MAX_CONCURRENT_REQUESTS: usize = 8;
+}
+
+impl Default for EventCacheConfig {
+    fn default() -> Self {
+        Self {
+            max_pinned_events_concurrent_requests: Self::DEFAULT_MAX_CONCURRENT_REQUESTS,
+            max_pinned_events_to_load: Self::DEFAULT_MAX_EVENTS_TO_LOAD,
+        }
+    }
+}
+
 struct EventCacheInner {
     /// A weak reference to the inner client, useful when trying to get a handle
     /// on the owning client.
     client: WeakClient,
+
+    /// Global configuration for the event cache.
+    config: RwLock<EventCacheConfig>,
 
     /// Reference to the underlying store.
     store: EventCacheStoreLock,
@@ -963,10 +1015,9 @@ impl EventCacheInner {
             let mut state_guard = state_guard?;
             let updates_as_vector_diffs = state_guard.reset().await?;
 
-            let _ = room.inner.update_sender.send(RoomEventCacheUpdate::UpdateTimelineEvents {
-                diffs: updates_as_vector_diffs,
-                origin: EventsOrigin::Cache,
-            });
+            let _ = room.inner.update_sender.send(RoomEventCacheUpdate::UpdateTimelineEvents(
+                TimelineVectorDiffs { diffs: updates_as_vector_diffs, origin: EventsOrigin::Cache },
+            ));
 
             let _ = room
                 .inner
@@ -1200,13 +1251,7 @@ pub enum RoomEventCacheUpdate {
     },
 
     /// The room has received updates for the timeline as _diffs_.
-    UpdateTimelineEvents {
-        /// Diffs to apply to the timeline.
-        diffs: Vec<VectorDiff<TimelineEvent>>,
-
-        /// Where the diffs are coming from.
-        origin: EventsOrigin,
-    },
+    UpdateTimelineEvents(TimelineVectorDiffs),
 
     /// The room has received new ephemeral events.
     AddEphemeralEvents {

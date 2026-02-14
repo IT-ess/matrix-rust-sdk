@@ -1,3 +1,17 @@
+// Copyright 2025 The Matrix.org Foundation C.I.C.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for that specific language governing permissions and
+// limitations under the License.
+
 use std::{
     collections::HashMap,
     fmt::Debug,
@@ -235,6 +249,32 @@ pub trait SendQueueRoomErrorListener: SyncOutsideWasm + SendOutsideWasm {
 pub trait AccountDataListener: SyncOutsideWasm + SendOutsideWasm {
     /// Called when a global account data event has changed.
     fn on_change(&self, event: AccountDataEvent);
+}
+
+/// A listener for duplicate key upload errors triggered by requests to
+/// /keys/upload.
+#[matrix_sdk_ffi_macros::export(callback_interface)]
+pub trait DuplicateKeyUploadErrorListener: SyncOutsideWasm + SendOutsideWasm {
+    /// Called once when uploading keys fails.
+    fn on_duplicate_key_upload_error(&self, message: Option<DuplicateOneTimeKeyErrorMessage>);
+}
+
+/// Information about the old and new key that caused a duplicate key upload
+/// error in /keys/upload.
+#[derive(uniffi::Record)]
+pub struct DuplicateOneTimeKeyErrorMessage {
+    /// The previously uploaded one-time key, encoded as unpadded base64.
+    pub old_key: String,
+    /// The one-time key we attempted to upload, encoded as unpadded base64
+    pub new_key: String,
+}
+
+impl From<matrix_sdk::encryption::DuplicateOneTimeKeyErrorMessage>
+    for DuplicateOneTimeKeyErrorMessage
+{
+    fn from(value: matrix_sdk::encryption::DuplicateOneTimeKeyErrorMessage) -> Self {
+        Self { old_key: value.old_key.to_base64(), new_key: value.new_key.to_base64() }
+    }
 }
 
 /// A listener for changes of room account data events.
@@ -748,6 +788,28 @@ impl Client {
         })))
     }
 
+    /// Subscribe to duplicate key upload errors triggered by requests to
+    /// /keys/upload.
+    pub fn subscribe_to_duplicate_key_upload_errors(
+        &self,
+        listener: Box<dyn DuplicateKeyUploadErrorListener>,
+    ) -> Arc<TaskHandle> {
+        let mut subscriber = self.inner.subscribe_to_duplicate_key_upload_errors();
+
+        Arc::new(TaskHandle::new(get_runtime_handle().spawn(async move {
+            loop {
+                match subscriber.recv().await {
+                    Ok(message) => {
+                        listener.on_duplicate_key_upload_error(message.map(|m| m.into()))
+                    }
+                    Err(err) => {
+                        error!("error when listening to key upload errors: {err}");
+                    }
+                }
+            }
+        })))
+    }
+
     /// Subscribe to updates of global account data events.
     ///
     /// Be careful that only the most recent value can be observed. Subscribers
@@ -905,46 +967,50 @@ impl Client {
                         .collect();
 
                     // Convert SDK event to FFI type
-                    let (sender, event, thread_id) = match notification.event {
-                        RawAnySyncOrStrippedTimelineEvent::Sync(raw) => match raw.deserialize() {
-                            Ok(deserialized) => {
-                                let sender = deserialized.sender().to_owned();
-                                let thread_id = match &deserialized {
-                                    AnySyncTimelineEvent::MessageLike(event) => {
-                                        match event.original_content() {
-                                            Some(AnyMessageLikeEventContent::RoomMessage(
-                                                content,
-                                            )) => match content.relates_to {
-                                                Some(Relation::Thread(thread)) => {
-                                                    Some(thread.event_id.to_string())
-                                                }
+                    let (sender, event, thread_id, raw_event) = match notification.event {
+                        RawAnySyncOrStrippedTimelineEvent::Sync(raw) => {
+                            let raw_event = raw.json().get().to_owned();
+                            match raw.deserialize() {
+                                Ok(deserialized) => {
+                                    let sender = deserialized.sender().to_owned();
+                                    let thread_id = match &deserialized {
+                                        AnySyncTimelineEvent::MessageLike(event) => {
+                                            match event.original_content() {
+                                                Some(AnyMessageLikeEventContent::RoomMessage(
+                                                    content,
+                                                )) => match content.relates_to {
+                                                    Some(Relation::Thread(thread)) => {
+                                                        Some(thread.event_id.to_string())
+                                                    }
+                                                    _ => None,
+                                                },
                                                 _ => None,
-                                            },
-                                            _ => None,
+                                            }
                                         }
-                                    }
-                                    _ => None,
-                                };
-                                let event = NotificationEvent::Timeline {
-                                    event: Arc::new(crate::event::TimelineEvent(Box::new(
-                                        deserialized,
-                                    ))),
-                                };
-                                (sender, event, thread_id)
+                                        _ => None,
+                                    };
+                                    let event = NotificationEvent::Timeline {
+                                        event: Arc::new(crate::event::TimelineEvent(Box::new(
+                                            deserialized,
+                                        ))),
+                                    };
+                                    (sender, event, thread_id, raw_event)
+                                }
+                                Err(err) => {
+                                    tracing::warn!("Failed to deserialize timeline event: {err}");
+                                    return;
+                                }
                             }
-                            Err(err) => {
-                                tracing::warn!("Failed to deserialize timeline event: {err}");
-                                return;
-                            }
-                        },
+                        }
                         RawAnySyncOrStrippedTimelineEvent::Stripped(raw) => {
+                            let raw_event = raw.json().get().to_owned();
                             match raw.deserialize() {
                                 Ok(deserialized) => {
                                     let sender = deserialized.sender().to_owned();
                                     let event =
                                         NotificationEvent::Invite { sender: sender.to_string() };
                                     let thread_id = None;
-                                    (sender, event, thread_id)
+                                    (sender, event, thread_id, raw_event)
                                 }
                                 Err(err) => {
                                     tracing::warn!(
@@ -1007,6 +1073,7 @@ impl Client {
                     listener.on_notification(
                         NotificationItem {
                             event,
+                            raw_event,
                             sender_info,
                             room_info,
                             is_noisy: Some(is_noisy),

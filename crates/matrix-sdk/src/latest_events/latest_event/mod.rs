@@ -23,7 +23,7 @@ pub use matrix_sdk_base::latest_event::{
 };
 use matrix_sdk_base::{RoomInfoNotableUpdateReasons, RoomState, StateChanges};
 use ruma::{EventId, OwnedEventId, UserId, events::room::power_levels::RoomPowerLevels};
-use tracing::{error, info, instrument, warn};
+use tracing::{error, info, instrument, trace, warn};
 
 use crate::{Room, event_cache::RoomEventCache, room::WeakRoom, send_queue::RoomSendQueueUpdate};
 
@@ -110,7 +110,7 @@ impl LatestEvent {
         )
         .await;
 
-        info!(value = ?new_value, "Computed a remote `LatestEventValue`");
+        trace!(value = ?new_value, "Computed a remote `LatestEventValue`");
 
         if let Some(new_value) = new_value {
             self.update(new_value).await;
@@ -137,7 +137,7 @@ impl LatestEvent {
         )
         .await;
 
-        info!(value = ?new_value, "Computed a local `LatestEventValue`");
+        trace!(value = ?new_value, "Computed a local `LatestEventValue`");
 
         if let Some(new_value) = new_value {
             self.update(new_value).await;
@@ -156,9 +156,27 @@ impl LatestEvent {
                 // If the room' state is `Invited`, it means the current user has been recently
                 // invited to this room.
                 RoomState::Invited => {
+                    // Short: Let's not update a `RemoteInvite` to another `RemoteInvite`.
+                    //
+                    // Long: An invite room is only constituted of stripped-state events. These
+                    // events do not have an `origin_server_ts` field. It means we cannot compute
+                    // the timestamp of the `LatestEventValue`. To workaround this, we set the
+                    // timestamp to `now()`. See `Builder::new_remote_for_invite` to learn more.
+                    // If an invite room receives a new event, its `LatestEventValue`'s timestamp
+                    // will be updated to `now()`, which will make the room bumps to the top of the
+                    // room list for example. This is not an acceptable behaviour because it can be
+                    // an “attack vector”, i.e. a way to annoy people with spammy invites. That's
+                    // why, once a `RemoteInvite` has been computed, we do not refresh it.
+                    if matches!(
+                        self.current_value.read().await.deref(),
+                        LatestEventValue::RemoteInvite { .. }
+                    ) {
+                        return;
+                    }
+
                     let new_value = Builder::new_remote_for_invite(&room).await;
 
-                    info!(value = ?new_value, "Computed a remote `LatestEventValue` for invite");
+                    trace!(value = ?new_value, "Computed a remote `LatestEventValue` for invite");
 
                     new_value
                 }

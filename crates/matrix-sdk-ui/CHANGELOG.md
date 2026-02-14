@@ -8,6 +8,9 @@ All notable changes to this project will be documented in this file.
 
 ### Bug Fixes
 
+- Ensure that the display name of a `Room` in a `NotificationStatus` coming 
+  from a `NotificationClient` excludes service members.
+  ([#6136](https://github.com/matrix-org/matrix-rust-sdk/pull/6136))
 - Fix the `is_last_admin` check in `LeaveSpaceRoom` since it was not
   accounting for the membership state.
   [#6032](https://github.com/matrix-org/matrix-rust-sdk/pull/6032)
@@ -256,7 +259,7 @@ All notable changes to this project will be documented in this file.
 
 - Don't consider rooms in the banned state to be non-left rooms. This bug was
   introduced due to the introduction of the banned state for rooms, and the
-  non-left room filter did not take the new room stat into account.
+  non-left room filter did not take the new room state into account.
   ([#4448](https://github.com/matrix-org/matrix-rust-sdk/pull/4448))
 
 - Fix `EventTimelineItem::latest_edit_json()` when it is populated by a live

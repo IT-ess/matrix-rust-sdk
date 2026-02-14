@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     sync::{Arc, atomic::AtomicBool},
 };
 
@@ -33,6 +33,7 @@ use ruma::{
             CallMemberStateKey, MembershipData, PossiblyRedactedCallMemberEventContent,
         },
         direct::OwnedDirectUserIdentifier,
+        member_hints::PossiblyRedactedMemberHintsEventContent,
         room::{
             avatar::{self, PossiblyRedactedRoomAvatarEventContent},
             canonical_alias::PossiblyRedactedRoomCanonicalAliasEventContent,
@@ -150,6 +151,9 @@ pub struct BaseRoomInfo {
     pub(crate) join_rules: Option<MinimalStateEvent<PossiblyRedactedRoomJoinRulesEventContent>>,
     /// The maximal power level that can be found in this room.
     pub(crate) max_power_level: i64,
+    /// The member hints for the room as per MSC4171, including service members,
+    /// if available.
+    pub(crate) member_hints: Option<MinimalStateEvent<PossiblyRedactedMemberHintsEventContent>>,
     /// The `m.room.name` of this room.
     pub(crate) name: Option<MinimalStateEvent<PossiblyRedactedRoomNameEventContent>>,
     /// The `m.room.tombstone` event content of this room.
@@ -263,6 +267,17 @@ impl BaseRoomInfo {
                 } else {
                     // Remove the previous content if the new content is unknown.
                     self.guest_access.take().is_some()
+                }
+            }
+            (StateEventType::MemberHints, "") => {
+                if let Some(event) = raw_event.deserialize_as(|any_event| {
+                    as_variant!(any_event, AnySyncStateEvent::MemberHints)
+                }) {
+                    self.member_hints = Some(event.into());
+                    true
+                } else {
+                    // Remove the previous content if the new content is unknown.
+                    self.member_hints.take().is_some()
                 }
             }
             (StateEventType::RoomJoinRules, "") => {
@@ -528,6 +543,7 @@ impl Default for BaseRoomInfo {
             canonical_alias: None,
             create: None,
             dm_targets: Default::default(),
+            member_hints: None,
             encryption: None,
             guest_access: None,
             history_visibility: None,
@@ -1054,6 +1070,12 @@ impl RoomInfo {
         Some(&self.base_info.join_rules.as_ref()?.content.join_rule)
     }
 
+    /// Return the service members for this room if the `m.member_hints` event
+    /// is available
+    pub fn service_members(&self) -> Option<&BTreeSet<OwnedUserId>> {
+        self.base_info.member_hints.as_ref()?.content.service_members.as_ref()
+    }
+
     /// Get the name of this room.
     pub fn name(&self) -> Option<&str> {
         self.base_info.name.as_ref()?.content.name.as_deref().filter(|name| !name.is_empty())
@@ -1350,13 +1372,10 @@ mod tests {
     use std::sync::Arc;
 
     use assert_matches::assert_matches;
-    use matrix_sdk_test::{
-        async_test,
-        test_json::{TAG, sync_events::PINNED_EVENTS},
-    };
+    use matrix_sdk_test::{async_test, event_factory::EventFactory, test_json::TAG};
     use ruma::{
         assign, events::room::pinned_events::RoomPinnedEventsEventContent, owned_event_id,
-        owned_mxc_uri, owned_user_id, room_id, serde::Raw,
+        owned_mxc_uri, owned_user_id, room_id, serde::Raw, user_id,
     };
     use serde_json::json;
     use similar_asserts::assert_eq;
@@ -1442,6 +1461,7 @@ mod tests {
                 "is_marked_unread_source": "Unstable",
                 "join_rules": null,
                 "max_power_level": 100,
+                "member_hints": null,
                 "name": null,
                 "tombstone": null,
                 "topic": null,
@@ -1544,7 +1564,10 @@ mod tests {
         let tag_event = raw_tag_event.deserialize().unwrap();
         changes.add_room_account_data(&room_info.room_id, tag_event, raw_tag_event);
 
-        let raw_pinned_events_event = Raw::new(&*PINNED_EVENTS).unwrap().cast_unchecked();
+        let f = EventFactory::new().room(&room_info.room_id).sender(user_id!("@example:localhost"));
+        let raw_pinned_events_event: Raw<_> = f
+            .room_pinned_events(vec![owned_event_id!("$a"), owned_event_id!("$b")])
+            .into_raw_sync_state();
         let pinned_events_event = raw_pinned_events_event.deserialize().unwrap();
         changes.add_state_event(&room_info.room_id, pinned_events_event, raw_pinned_events_event);
 
@@ -1595,6 +1618,7 @@ mod tests {
                 "history_visibility": null,
                 "join_rules": null,
                 "max_power_level": 100,
+                "member_hints": null,
                 "name": null,
                 "tombstone": null,
                 "topic": null,
@@ -1634,6 +1658,7 @@ mod tests {
         assert!(info.base_info.history_visibility.is_none());
         assert!(info.base_info.join_rules.is_none());
         assert_eq!(info.base_info.max_power_level, 100);
+        assert!(info.base_info.member_hints.is_none());
         assert!(info.base_info.name.is_none());
         assert!(info.base_info.tombstone.is_none());
         assert!(info.base_info.topic.is_none());
