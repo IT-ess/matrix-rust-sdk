@@ -85,7 +85,10 @@ use ruma::{
         filter::LazyLoadOptions,
         membership::{
             Invite3pid, ban_user, forget_room, get_member_events,
-            invite_user::{self, v3::InvitationRecipient},
+            invite_user::{
+                self,
+                v3::{InvitationRecipient, InviteUserId},
+            },
             kick_user, leave_room, unban_user,
         },
         message::send_message_event,
@@ -114,7 +117,7 @@ use ruma::{
         room::{
             ImageInfo, MediaSource, ThumbnailInfo,
             avatar::{self, RoomAvatarEventContent},
-            encryption::RoomEncryptionEventContent,
+            encryption::PossiblyRedactedRoomEncryptionEventContent,
             history_visibility::HistoryVisibility,
             member::{MembershipChange, RoomMemberEventContent, SyncRoomMemberEvent},
             message::{
@@ -615,6 +618,11 @@ impl Room {
         )
         .await;
 
+        // Save the loaded events into the event cache, if it's set up.
+        if let Ok((cache, _handles)) = self.event_cache().await {
+            cache.save_events(chunk.clone()).await;
+        }
+
         Ok(Messages {
             start: http_response.start,
             end: http_response.end,
@@ -1075,7 +1083,8 @@ impl Room {
                     Ok(response) => Some(
                         response
                             .into_content()
-                            .deserialize_as_unchecked::<RoomEncryptionEventContent>()?,
+                            .deserialize_as_unchecked::<PossiblyRedactedRoomEncryptionEventContent>(
+                            )?,
                     ),
                     Err(err) if err.client_api_error_kind() == Some(&ErrorKind::NotFound) => None,
                     Err(err) => return Err(err.into()),
@@ -1087,7 +1096,7 @@ impl Room {
                 // `RoomInfo`.
                 let mut room_info = self.clone_info();
                 room_info.mark_encryption_state_synced();
-                room_info.set_encryption_event(response.clone());
+                room_info.set_encryption_event(response);
                 let mut changes = StateChanges::default();
                 changes.add_room(room_info.clone());
 
@@ -2001,7 +2010,7 @@ impl Room {
             shared_room_history::share_room_history(self, user_id.to_owned()).await?;
         }
 
-        let recipient = InvitationRecipient::UserId { user_id: user_id.to_owned() };
+        let recipient = InvitationRecipient::UserId(InviteUserId::new(user_id.to_owned()));
         let request = invite_user::v3::Request::new(self.room_id().to_owned(), recipient);
         self.client.send(request).await?;
 
@@ -4887,8 +4896,7 @@ mod tests {
 
     use matrix_sdk_base::{ComposerDraft, DraftAttachment, store::ComposerDraftType};
     use matrix_sdk_test::{
-        JoinedRoomBuilder, StateTestEvent, SyncResponseBuilder, async_test,
-        event_factory::EventFactory, test_json,
+        JoinedRoomBuilder, SyncResponseBuilder, async_test, event_factory::EventFactory,
     };
     use ruma::{
         RoomVersionId, event_id,
@@ -4944,16 +4952,19 @@ mod tests {
                 .and(header("authorization", "Bearer 1234"))
                 .respond_with(
                     ResponseTemplate::new(200)
-                        .set_body_json(&*test_json::sync_events::ENCRYPTION_CONTENT),
+                        .set_body_json(EventFactory::new().room_encryption().into_content()),
                 )
                 .mount(&server)
                 .await;
+            let f = EventFactory::new().sender(user_id!("@example:localhost"));
             let response = SyncResponseBuilder::default()
                 .add_joined_room(
                     JoinedRoomBuilder::default()
-                        .add_state_event(StateTestEvent::Member)
-                        .add_state_event(StateTestEvent::PowerLevels)
-                        .add_state_event(StateTestEvent::Encryption),
+                        .add_state_event(
+                            f.member(user_id!("@example:localhost")).display_name("example"),
+                        )
+                        .add_state_event(f.default_power_levels())
+                        .add_state_event(f.room_encryption()),
                 )
                 .build_sync_response();
             client.base_client().receive_sync_response(response).await.unwrap();

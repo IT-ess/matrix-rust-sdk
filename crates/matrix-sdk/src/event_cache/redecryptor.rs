@@ -121,7 +121,7 @@ use std::{
 
 use as_variant::as_variant;
 use futures_core::Stream;
-use futures_util::{StreamExt, pin_mut};
+use futures_util::{StreamExt, future::join_all, pin_mut};
 #[cfg(doc)]
 use matrix_sdk_base::{BaseClient, crypto::OlmMachine};
 use matrix_sdk_base::{
@@ -154,16 +154,12 @@ use tracing::{info, instrument, trace, warn};
 
 #[cfg(doc)]
 use super::RoomEventCache;
-use super::{EventCache, EventCacheError, EventCacheInner, EventsOrigin, RoomEventCacheUpdate};
-use crate::{
-    Client, Result, Room,
-    encryption::backups::BackupState,
-    event_cache::{
-        RoomEventCacheGenericUpdate, RoomEventCacheLinkedChunkUpdate, TimelineVectorDiffs,
-        room::PostProcessingOrigin,
-    },
-    room::PushContext,
+use super::{
+    EventCache, EventCacheError, EventCacheInner, EventsOrigin, RoomEventCacheGenericUpdate,
+    RoomEventCacheUpdate, TimelineVectorDiffs,
+    caches::room::{PostProcessingOrigin, RoomEventCacheLinkedChunkUpdate},
 };
+use crate::{Client, Result, Room, encryption::backups::BackupState, room::PushContext};
 
 type SessionId<'a> = &'a str;
 type OwnedSessionId = String;
@@ -370,7 +366,7 @@ impl EventCache {
         // Get the cache for this particular room and lock the state for the duration of
         // the decryption.
         let (room_cache, _drop_handles) = self.for_room(room_id).await?;
-        let mut state = room_cache.inner.state.write().await?;
+        let mut state = room_cache.state().write().await?;
 
         let event_ids: BTreeSet<_> =
             events.iter().cloned().map(|(event_id, _, _)| event_id).collect();
@@ -380,6 +376,13 @@ impl EventCache {
         if let Some(pinned_cache) = state.pinned_event_cache() {
             pinned_cache.replace_utds(&events).await?;
         }
+
+        // Consider all the live event-focused caches too.
+        // TODO: This ain't great for performance; there shouldn't be that many
+        // event-focused caches alive at the same time, but they could
+        // accumulate over time. Consider keeping track of which linked chunk contain
+        // which event id, to avoid doing the linear searches here.
+        join_all(state.event_focused_caches().map(|cache| cache.replace_utds(&events))).await;
 
         // Consider the room linked chunk.
         for (event_id, decrypted, actions) in events {
@@ -404,16 +407,13 @@ impl EventCache {
 
         // We replaced a bunch of events, reactive updates for those replacements have
         // been queued up. We need to send them out to our subscribers now.
-        let diffs = state.room_linked_chunk().updates_as_vector_diffs();
-
-        let _ = room_cache.inner.update_sender.send(RoomEventCacheUpdate::UpdateTimelineEvents(
-            TimelineVectorDiffs { diffs, origin: EventsOrigin::Cache },
-        ));
-
-        let _ = room_cache
-            .inner
-            .generic_update_sender
-            .send(RoomEventCacheGenericUpdate { room_id: room_id.to_owned() });
+        room_cache.update_sender().send(
+            RoomEventCacheUpdate::UpdateTimelineEvents(TimelineVectorDiffs {
+                diffs: state.room_linked_chunk_mut().updates_as_vector_diffs(),
+                origin: EventsOrigin::Cache,
+            }),
+            Some(RoomEventCacheGenericUpdate { room_id: room_id.to_owned() }),
+        );
 
         // We report that we resolved some UTDs, this is mainly for listeners that don't
         // care about the actual events, just about the fact that UTDs got
@@ -1096,11 +1096,10 @@ mod tests {
         sleep::sleep,
         store::StoreConfig,
     };
-    use matrix_sdk_test::{
-        JoinedRoomBuilder, StateTestEvent, async_test, event_factory::EventFactory,
-    };
+    use matrix_sdk_common::cross_process_lock::CrossProcessLockConfig;
+    use matrix_sdk_test::{JoinedRoomBuilder, async_test, event_factory::EventFactory};
     use ruma::{
-        EventId, OwnedEventId, RoomId, device_id, event_id,
+        EventId, OwnedEventId, RoomId, RoomVersionId, device_id, event_id,
         events::{AnySyncTimelineEvent, relation::RelationType},
         room_id,
         serde::Raw,
@@ -1312,12 +1311,19 @@ mod tests {
             let store = DelayingStore::new();
 
             (
-                StoreConfig::new("delayed_store_event_cache_test".into())
-                    .event_cache_store(store.clone()),
+                StoreConfig::new(CrossProcessLockConfig::multi_process(
+                    "delayed_store_event_cache_test",
+                ))
+                .event_cache_store(store.clone()),
                 Some(store),
             )
         } else {
-            (StoreConfig::new("normal_store_event_cache_test".into()), None)
+            (
+                StoreConfig::new(CrossProcessLockConfig::multi_process(
+                    "normal_store_event_cache_test",
+                )),
+                None,
+            )
         };
 
         let bob = matrix_mock_server
@@ -1337,10 +1343,12 @@ mod tests {
         // Ensure that Alice and Bob are aware of their devices and identities.
         matrix_mock_server.exchange_e2ee_identities(&alice, &bob).await;
 
+        let event_factory = EventFactory::new().room(room_id).sender(alice_user_id);
+
         // Let us now create a room for them.
         let room_builder = JoinedRoomBuilder::new(room_id)
-            .add_state_event(StateTestEvent::Create)
-            .add_state_event(StateTestEvent::Encryption);
+            .add_state_event(event_factory.create(alice_user_id, RoomVersionId::V1))
+            .add_state_event(event_factory.room_encryption());
 
         matrix_mock_server
             .mock_sync()

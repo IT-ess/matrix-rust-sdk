@@ -47,6 +47,7 @@ use matrix_sdk::{
         },
     },
 };
+use matrix_sdk_common::cross_process_lock::CrossProcessLockConfig;
 use matrix_sdk_test::{TestError, TestResult};
 use matrix_sdk_ui::{
     Timeline,
@@ -680,7 +681,7 @@ async fn test_room_keys_received_on_notification_client_trigger_redecryption() {
 
     // Now we create a notification client.
     let notification_client = bob
-        .notification_client("BOB_NOTIFICATION_CLIENT".to_owned())
+        .notification_client(CrossProcessLockConfig::multi_process("BOB_NOTIFICATION_CLIENT"))
         .await
         .expect("We should be able to build a notification client");
 
@@ -1271,9 +1272,6 @@ async fn test_pinned_events_are_decrypted_after_recovering_with_event_not_in_tim
 /// variant even if the focused UTD event isn't part of the main timeline and
 /// thus wasn't put into the event cache by the main timeline backpaginating.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-// FIXME: This test is ignored because R2D2 can't decrypt this event as
-// it's never put into the event cache.
-#[ignore]
 async fn test_permalink_timelines_redecrypt() -> TestResult {
     const RECOVERY_PASSPHRASE: &str = "I am error";
 
