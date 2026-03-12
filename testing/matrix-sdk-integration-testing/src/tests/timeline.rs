@@ -22,7 +22,7 @@ use eyeball_im::{Vector, VectorDiff};
 use futures::pin_mut;
 use futures_util::{FutureExt, StreamExt};
 use matrix_sdk::{
-    Client, Room, RoomState, ThreadingSupport, assert_next_with_timeout,
+    Client, Room, RoomState, ThreadingSupport, assert_let_timeout, assert_next_with_timeout,
     config::SyncSettings,
     deserialized_responses::{VerificationLevel, VerificationState},
     encryption::{
@@ -40,7 +40,7 @@ use matrix_sdk::{
             room::{
                 encryption::RoomEncryptionEventContent,
                 message::{
-                    ReplyWithinThread, RoomMessageEventContent,
+                    AddMentions, ReplyWithinThread, RoomMessageEventContent,
                     RoomMessageEventContentWithoutRelation,
                 },
             },
@@ -196,7 +196,7 @@ async fn test_toggling_reaction() -> Result<()> {
 
         sleep(Duration::from_secs(1)).await;
 
-        assert_let!(Some(timeline_updates) = stream.next().await);
+        assert_let_timeout!(Some(timeline_updates) = stream.next());
         assert_eq!(timeline_updates.len(), 3);
 
         // Local echo is added.
@@ -237,7 +237,7 @@ async fn test_toggling_reaction() -> Result<()> {
 
         sleep(Duration::from_secs(1)).await;
 
-        assert_let!(Some(timeline_updates) = stream.next().await);
+        assert_let_timeout!(Some(timeline_updates) = stream.next());
         assert_eq!(timeline_updates.len(), 1);
 
         // The reaction is removed.
@@ -963,6 +963,7 @@ async fn test_thread_focused_timeline() -> TestResult {
             Reply {
                 event_id: thread_root.clone(),
                 enforce_thread: EnforceThread::Threaded(ReplyWithinThread::No),
+                add_mentions: AddMentions::Yes,
             },
         )
         .await?;
@@ -1520,6 +1521,7 @@ async fn test_latest_thread_event_is_redecrypted_and_updated() -> TestResult {
             Reply {
                 event_id: thread_root_event_id.clone(),
                 enforce_thread: EnforceThread::Threaded(ReplyWithinThread::No),
+                add_mentions: AddMentions::Yes,
             },
         )
         .await?;
@@ -1536,8 +1538,7 @@ async fn test_latest_thread_event_is_redecrypted_and_updated() -> TestResult {
     {
         // Her timeline sees a new item for the thread reply, because we don't know yet
         // that the thread reply is part of the thread, as it's encrypted.
-        // TODO(bnjbvr): we should know it, since an encrypted event includes the
-        // relationship?
+        // TODO: we should know it, since an encrypted event includes the relationship?
         let next_item = assert_next_with_timeout!(stream, 5000);
         assert_let!(VectorDiff::PushBack { value } = next_item);
         assert!(value.content().is_unable_to_decrypt());

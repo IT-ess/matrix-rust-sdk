@@ -8,6 +8,11 @@ All notable changes to this project will be documented in this file.
 
 ### Bug Fixes
 
+- [**breaking**] `OtherState` properly supports redacted events that still have fields in the
+  content. The following fields are no longer optional:
+  - `federate` in `OtherState::RoomCreate`.
+  - `history_visibility` in `OtherState::RoomHistoryVisibility`.
+  - `thresholds` in `OtherState::RoomPowerLevels`.
 - `omit_checksums` option is now enabled for the Kotlin bindings in all FFI-exporting crates.
   We enabled them because with JNA direct mapping enabled they result in invalid checks in
   ARM 32bit devices, preventing the SDK from working altogether (see
@@ -31,6 +36,14 @@ All notable changes to this project will be documented in this file.
 
 ### Features
 
+- Add the `QrCodeData::base_url` and `QrCodeData::intent` methods.
+  ([#6283](https://github.com/matrix-org/matrix-rust-sdk/pull/6283))
+- Add `Encryption::recover_and_fix_backup` to automatically fix key storage backup if the
+  private backup decryption key is missing, invalid or inconsistent with the public key.
+  ([#6252](https://github.com/matrix-org/matrix-rust-sdk/pull/6252))
+- Add support for [MSC3489](https://github.com/matrix-org/matrix-spec-proposals/pull/3489)  
+  live location sharing through a new `TimelineItemContent::LiveLocation` variant.
+  ([#6232](https://github.com/matrix-org/matrix-rust-sdk/pull/6232))
 - Add `HumanQrGrantLoginError::ConnectionInsecure` for errors establishing the secure channel
   ([#6141](https://github.com/matrix-org/matrix-rust-sdk/pull/6141)
 - Add `HumanQrGrantLoginError::Expired` for when a timeout is encountered during the grant
@@ -91,6 +104,9 @@ All notable changes to this project will be documented in this file.
 
 ### Refactor
 
+- [**breaking**] `Room::report_content()` no longer takes a `score` argument, because it was
+  removed from the Matrix specification.
+  ([#6256](https://github.com/matrix-org/matrix-rust-sdk/pull/6256))
 - [**breaking**] The `current_version` field of `ErrorKind::WrongRoomKeysVersion`
   is no longer optional.
   ([#6241](https://github.com/matrix-org/matrix-rust-sdk/pull/6241))

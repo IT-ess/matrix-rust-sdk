@@ -48,7 +48,7 @@ use ruma::{
         receipt::{Receipt, ReceiptThread},
         relation::Thread,
         room::message::{
-            Relation, RelationWithoutReplacement, ReplyWithinThread,
+            AddMentions, Relation, RelationWithoutReplacement, ReplyWithinThread,
             RoomMessageEventContentWithoutRelation, TextMessageEventContent,
         },
     },
@@ -88,12 +88,12 @@ pub use self::{
     error::*,
     event_filter::{TimelineEventCondition, TimelineEventFilter},
     event_item::{
-        AnyOtherStateEventContentChange, EmbeddedEvent, EncryptedMessage, EventItemOrigin,
-        EventSendState, EventTimelineItem, InReplyToDetails, MediaUploadProgress,
-        MemberProfileChange, MembershipChange, Message, MsgLikeContent, MsgLikeKind,
-        OtherMessageLike, OtherState, PollResult, PollState, Profile, ReactionInfo, ReactionStatus,
-        ReactionsByKeyBySender, RoomMembershipChange, RoomPinnedEventsChange, Sticker,
-        ThreadSummary, TimelineDetails, TimelineEventItemId, TimelineEventShieldState,
+        AnyOtherStateEventContentChange, BeaconInfo, EmbeddedEvent, EncryptedMessage,
+        EventItemOrigin, EventSendState, EventTimelineItem, InReplyToDetails, LiveLocationState,
+        MediaUploadProgress, MemberProfileChange, MembershipChange, Message, MsgLikeContent,
+        MsgLikeKind, OtherMessageLike, OtherState, PollResult, PollState, Profile, ReactionInfo,
+        ReactionStatus, ReactionsByKeyBySender, RoomMembershipChange, RoomPinnedEventsChange,
+        Sticker, ThreadSummary, TimelineDetails, TimelineEventItemId, TimelineEventShieldState,
         TimelineEventShieldStateCode, TimelineItemContent,
     },
     item::{TimelineItem, TimelineItemKind, TimelineUniqueId},
@@ -420,7 +420,11 @@ impl Timeline {
             } else {
                 EnforceThread::MaybeThreaded
             };
-            return Some(Reply { event_id: in_reply_to, enforce_thread });
+            return Some(Reply {
+                event_id: in_reply_to,
+                enforce_thread,
+                add_mentions: AddMentions::Yes,
+            });
         }
 
         let thread_root = self.controller.thread_root()?;
@@ -452,6 +456,7 @@ impl Timeline {
         Some(Reply {
             event_id: latest_event_id,
             enforce_thread: EnforceThread::Threaded(ReplyWithinThread::No),
+            add_mentions: AddMentions::Yes,
         })
     }
 

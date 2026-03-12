@@ -21,7 +21,6 @@ use matrix_sdk::{
     room::{
         edit::EditedContent, power_levels::RoomPowerLevelChanges,
         ListThreadsOptions as SdkListThreadsOptions, Room as SdkRoom, RoomMemberRole,
-        TryFromReportedContentScoreError,
     },
     send_queue::RoomSendQueueUpdate as SdkRoomSendQueueUpdate,
     ComposerDraft as SdkComposerDraft, ComposerDraftType as SdkComposerDraftType,
@@ -484,18 +483,9 @@ impl Room {
     pub async fn report_content(
         &self,
         event_id: String,
-        score: Option<i32>,
         reason: Option<String>,
     ) -> Result<(), ClientError> {
-        self.inner
-            .report_content(
-                EventId::parse(event_id)?,
-                score.map(TryFrom::try_from).transpose().map_err(
-                    |error: TryFromReportedContentScoreError| ClientError::from_err(error),
-                )?,
-                reason,
-            )
-            .await?;
+        self.inner.report_content(EventId::parse(event_id)?, reason).await?;
 
         Ok(())
     }
@@ -1142,7 +1132,7 @@ impl Room {
                     geo_uri: event.last_location.location.uri.clone().to_string(),
                     description: None,
                     zoom_level: None,
-                    asset: None,
+                    asset: event.beacon_info.as_ref().map(|b| b.asset.type_.clone()).into(),
                 };
 
                 let Some(beacon_info) = event.beacon_info else {

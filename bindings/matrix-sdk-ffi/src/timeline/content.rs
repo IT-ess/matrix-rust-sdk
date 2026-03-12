@@ -21,8 +21,8 @@ use ruma::events::{
 };
 
 use crate::{
-    client::JoinRule, event::TimelineEventType, timeline::msg_like::MsgLikeContent,
-    utils::Timestamp,
+    client::JoinRule, event::TimelineEventType, ruma::AssetType,
+    timeline::msg_like::MsgLikeContent, utils::Timestamp,
 };
 
 impl From<matrix_sdk_ui::timeline::TimelineItemContent> for TimelineItemContent {
@@ -96,6 +96,28 @@ impl From<matrix_sdk_ui::timeline::TimelineItemContent> for TimelineItemContent 
                     error: error.to_string(),
                 }
             }
+
+            Content::LiveLocation(state) => {
+                let locations = state
+                    .locations()
+                    .iter()
+                    .map(|location| BeaconInfo {
+                        geo_uri: location.geo_uri().to_owned(),
+                        ts: location.ts().into(),
+                        description: location.description().map(ToOwned::to_owned),
+                    })
+                    .collect();
+
+                TimelineItemContent::LiveLocation {
+                    content: LiveLocationContent {
+                        is_live: state.is_live(),
+                        description: state.description().map(ToOwned::to_owned),
+                        timeout_ms: state.timeout().as_millis() as u64,
+                        asset_type: state.asset_type().into(),
+                        locations,
+                    },
+                }
+            }
         }
     }
 }
@@ -133,8 +155,8 @@ pub enum HistoryVisibility {
     },
 }
 
-impl From<RumaHistoryVisibility> for HistoryVisibility {
-    fn from(value: RumaHistoryVisibility) -> Self {
+impl From<&RumaHistoryVisibility> for HistoryVisibility {
+    fn from(value: &RumaHistoryVisibility) -> Self {
         match value {
             RumaHistoryVisibility::Invited => Self::Invited,
             RumaHistoryVisibility::Joined => Self::Joined,
@@ -184,6 +206,13 @@ pub enum TimelineItemContent {
         event_type: String,
         state_key: String,
         error: String,
+    },
+    /// A live location sharing session (MSC3489).
+    ///
+    /// Represents a `org.matrix.msc3672.beacon_info` state event with all
+    /// aggregated location updates from `org.matrix.msc3672.beacon` events.
+    LiveLocation {
+        content: LiveLocationContent,
     },
 }
 
@@ -271,12 +300,12 @@ pub enum OtherState {
     },
     RoomCanonicalAlias,
     RoomCreate {
-        federate: Option<bool>,
+        federate: bool,
     },
     RoomEncryption,
     RoomGuestAccess,
     RoomHistoryVisibility {
-        history_visibility: Option<HistoryVisibility>,
+        history_visibility: HistoryVisibility,
     },
     RoomJoinRules {
         join_rule: Option<JoinRule>,
@@ -292,7 +321,7 @@ pub enum OtherState {
         previous_events: Option<HashMap<TimelineEventType, i64>>,
         users: HashMap<String, i64>,
         previous_users: Option<HashMap<String, i64>>,
-        thresholds: Option<PowerLevelChanges>,
+        thresholds: PowerLevelChanges,
         previous_thresholds: Option<PowerLevelChanges>,
     },
     RoomServerAcl,
@@ -310,11 +339,47 @@ pub enum OtherState {
     },
 }
 
+/// FFI representation of a single location update from a beacon event.
+#[derive(Clone, uniffi::Record)]
+pub struct BeaconInfo {
+    /// The geo URI carrying the user's coordinates
+    /// (e.g. `"geo:51.5008,0.1247;u=35"`).
+    pub geo_uri: String,
+
+    /// Timestamp (ms since Unix Epoch) of this location update.
+    pub ts: Timestamp,
+
+    /// An optional human-readable description of the location.
+    pub description: Option<String>,
+}
+
+/// FFI representation of a live location sharing session (MSC3489).
+///
+/// Corresponds to a `org.matrix.msc3672.beacon_info` state event in the
+/// timeline. Location updates are aggregated here as they arrive.
+#[derive(Clone, uniffi::Record)]
+pub struct LiveLocationContent {
+    /// Whether this sharing session is currently active.
+    pub is_live: bool,
+
+    /// An optional human-readable label for this sharing session.
+    pub description: Option<String>,
+
+    /// Duration of the session in milliseconds.
+    pub timeout_ms: u64,
+
+    /// The asset type of the beacon (e.g. `Sender` for the user's own
+    /// location, `Pin` for a fixed point of interest).
+    pub asset_type: AssetType,
+
+    /// All location updates received so far, sorted oldest-first.
+    pub locations: Vec<BeaconInfo>,
+}
+
 impl From<&matrix_sdk_ui::timeline::AnyOtherStateEventContentChange> for OtherState {
     fn from(content: &matrix_sdk_ui::timeline::AnyOtherStateEventContentChange) -> Self {
         use matrix_sdk::ruma::events::StateEventContentChange as FullContent;
         use matrix_sdk_ui::timeline::AnyOtherStateEventContentChange as Content;
-
         match content {
             Content::PolicyRuleRoom(_) => Self::PolicyRuleRoom,
             Content::PolicyRuleServer(_) => Self::PolicyRuleServer,
@@ -332,8 +397,8 @@ impl From<&matrix_sdk_ui::timeline::AnyOtherStateEventContentChange> for OtherSt
             Content::RoomCanonicalAlias(_) => Self::RoomCanonicalAlias,
             Content::RoomCreate(c) => {
                 let federate = match c {
-                    FullContent::Original { content, .. } => Some(content.federate),
-                    FullContent::Redacted(_) => None,
+                    FullContent::Original { content, .. } => content.federate,
+                    FullContent::Redacted(content) => content.federate,
                 };
                 Self::RoomCreate { federate }
             }
@@ -341,25 +406,22 @@ impl From<&matrix_sdk_ui::timeline::AnyOtherStateEventContentChange> for OtherSt
             Content::RoomGuestAccess(_) => Self::RoomGuestAccess,
             Content::RoomHistoryVisibility(c) => {
                 let history_visibility = match c {
-                    FullContent::Original { content, .. } => {
-                        Some(content.history_visibility.clone().into())
-                    }
-                    FullContent::Redacted(_) => None,
+                    FullContent::Original { content, .. } => &content.history_visibility,
+                    FullContent::Redacted(content) => &content.history_visibility,
                 };
-                Self::RoomHistoryVisibility { history_visibility }
+                Self::RoomHistoryVisibility { history_visibility: history_visibility.into() }
             }
             Content::RoomJoinRules(c) => {
-                let join_rule = match c {
-                    FullContent::Original { content, .. } => {
-                        match content.join_rule.clone().try_into() {
-                            Ok(jr) => Some(jr),
-                            Err(err) => {
-                                tracing::error!("Failed to convert join rule: {}", err);
-                                None
-                            }
-                        }
+                let ruma_join_rule = match c {
+                    FullContent::Original { content, .. } => &content.join_rule,
+                    FullContent::Redacted(content) => &content.join_rule,
+                };
+                let join_rule = match ruma_join_rule.clone().try_into() {
+                    Ok(jr) => Some(jr),
+                    Err(err) => {
+                        tracing::error!("Failed to convert join rule: {}", err);
+                        None
                     }
-                    FullContent::Redacted(_) => None,
                 };
                 Self::RoomJoinRules { join_rule }
             }
@@ -371,8 +433,13 @@ impl From<&matrix_sdk_ui::timeline::AnyOtherStateEventContentChange> for OtherSt
                 Self::RoomName { name }
             }
             Content::RoomPinnedEvents(c) => Self::RoomPinnedEvents { change: c.into() },
-            Content::RoomPowerLevels(c) => match c {
-                FullContent::Original { content, prev_content } => Self::RoomPowerLevels {
+            Content::RoomPowerLevels(c) => {
+                let (content, prev_content) = match c.clone() {
+                    FullContent::Original { content, prev_content } => (content, prev_content),
+                    FullContent::Redacted(content) => (content.into(), None),
+                };
+
+                Self::RoomPowerLevels {
                     events: content
                         .events
                         .iter()
@@ -385,7 +452,7 @@ impl From<&matrix_sdk_ui::timeline::AnyOtherStateEventContentChange> for OtherSt
                             .map(|(k, &v)| (k.clone().into(), v.into()))
                             .collect()
                     }),
-                    thresholds: Some(PowerLevelChanges {
+                    thresholds: PowerLevelChanges {
                         ban: content.ban.into(),
                         kick: content.kick.into(),
                         events_default: content.events_default.into(),
@@ -394,7 +461,7 @@ impl From<&matrix_sdk_ui::timeline::AnyOtherStateEventContentChange> for OtherSt
                         state_default: content.state_default.into(),
                         users_default: content.users_default.into(),
                         notifications: content.notifications.room.into(),
-                    }),
+                    },
                     previous_thresholds: prev_content.as_ref().map(|prev_content| {
                         PowerLevelChanges {
                             ban: prev_content.ban.into(),
@@ -407,23 +474,15 @@ impl From<&matrix_sdk_ui::timeline::AnyOtherStateEventContentChange> for OtherSt
                             notifications: prev_content.notifications.room.into(),
                         }
                     }),
-                    users: power_level_user_changes(content, prev_content)
+                    users: power_level_user_changes(&content, &prev_content)
                         .iter()
                         .map(|(k, v)| (k.to_string(), *v))
                         .collect(),
                     previous_users: prev_content.as_ref().map(|prev_content| {
                         prev_content.users.iter().map(|(k, &v)| (k.to_string(), v.into())).collect()
                     }),
-                },
-                FullContent::Redacted(_) => Self::RoomPowerLevels {
-                    events: Default::default(),
-                    previous_events: None,
-                    users: Default::default(),
-                    previous_users: None,
-                    thresholds: None,
-                    previous_thresholds: None,
-                },
-            },
+                }
+            }
             Content::RoomServerAcl(_) => Self::RoomServerAcl,
             Content::RoomThirdPartyInvite(c) => {
                 let display_name = match c {
