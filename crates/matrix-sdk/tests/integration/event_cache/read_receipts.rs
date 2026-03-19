@@ -418,6 +418,76 @@ async fn test_redaction_does_not_increment_unread() {
     assert_eq!(room.num_unread_messages(), 0);
 }
 
+/// Test unread count behavior across a gappy sync followed by a normal sync.
+///
+/// `update_read_receipts()` runs before `shrink_to_last_chunk()` inside
+/// `handle_sync()`, so the unread count is recomputed against the pre-gap
+/// events and stays unchanged immediately after the gappy sync. The shrink
+/// then clears those events from memory, so the *subsequent* normal sync only
+/// sees the newly-arrived event when recomputing, yielding a count of 1.
+#[async_test]
+async fn test_gappy_sync_keeps_then_next_sync_resets_unread_count() {
+    let server = MatrixMockServer::new().await;
+    let client = server.client_builder().build().await;
+
+    client.event_cache().subscribe().unwrap();
+
+    let room_id = room_id!("!omelette:fromage.fr");
+    let f = EventFactory::new().room(room_id).sender(*BOB);
+
+    let room = server.sync_joined_room(&client, room_id).await;
+    let (room_event_cache, _drop_handles) = room.event_cache().await.unwrap();
+    let (_, mut room_cache_updates) = room_event_cache.subscribe().await.unwrap();
+    assert!(room_cache_updates.is_empty());
+
+    // First sync: two messages from BOB, no read receipt → unread count becomes 2.
+    server
+        .sync_room(
+            &client,
+            JoinedRoomBuilder::new(room_id)
+                .add_timeline_event(f.text_msg("hello").event_id(event_id!("$1")))
+                .add_timeline_event(f.text_msg("world").event_id(event_id!("$2"))),
+        )
+        .await;
+
+    assert_let_timeout!(Ok(_) = room_cache_updates.recv());
+
+    assert_eq!(room.num_unread_messages(), 2);
+
+    // Gappy sync: limited timeline with a prev_batch token and no new events.
+    server
+        .sync_room(
+            &client,
+            JoinedRoomBuilder::new(room_id)
+                .set_timeline_limited()
+                .set_timeline_prev_batch("prev-batch".to_owned()),
+        )
+        .await;
+
+    assert_let_timeout!(Ok(_) = room_cache_updates.recv());
+
+    // The unread count is recomputed while "$1" and "$2" are still in the linked
+    // chunk (shrinking happens after), so it remains 2.
+    assert_eq!(room.num_unread_messages(), 2);
+
+    // Normal (non-gappy) sync: one new message from BOB.
+    server
+        .sync_room(
+            &client,
+            JoinedRoomBuilder::new(room_id)
+                .add_timeline_event(f.text_msg("again").event_id(event_id!("$3"))),
+        )
+        .await;
+
+    assert_let_timeout!(Ok(_) = room_cache_updates.recv());
+
+    // The gappy sync cleared "$1" and "$2" from the linked chunk, so this sync
+    // only sees "$3" when recomputing the unread count, yielding 1. But this is
+    // incorrect, as the number should be *at least* 2, and the SDK should keep
+    // on showing this number in this case.
+    assert_eq!(room.num_unread_messages(), 2);
+}
+
 /// Test that messages with mentions increment the number of mentions.
 #[async_test]
 async fn test_mentions_increments_unread_mentions() {
@@ -459,4 +529,69 @@ async fn test_mentions_increments_unread_mentions() {
     // The message counts as unread and also increments the mentions count.
     assert_eq!(room.num_unread_messages(), 1);
     assert_eq!(room.num_unread_mentions(), 1);
+}
+
+/// Test that the unread count computation doesn't skip a more-recent active
+/// receipt, when iterating over events.
+#[async_test]
+async fn test_compute_unread_counts_considers_active_receipt() {
+    let server = MatrixMockServer::new().await;
+    let client = server.client_builder().build().await;
+    let own_user_id = client.user_id().unwrap();
+
+    client.event_cache().subscribe().unwrap();
+
+    let room_id = room_id!("!omelette:fromage.fr");
+    let f = EventFactory::new().room(room_id).sender(*BOB);
+
+    let room = server.sync_joined_room(&client, room_id).await;
+
+    let (room_event_cache, _drop_handles) = room.event_cache().await.unwrap();
+    let (_, mut room_cache_updates) = room_event_cache.subscribe().await.unwrap();
+    assert!(room_cache_updates.is_empty());
+
+    // Starting with a room with 1 implicit receipt, then two messages from Bob, and
+    // a receipt on Bob's first message $2,
+    server
+        .sync_room(
+            &client,
+            JoinedRoomBuilder::new(room_id)
+                .add_timeline_event(
+                    f.text_msg("hello 1").sender(own_user_id).event_id(event_id!("$1")),
+                )
+                .add_timeline_event(f.text_msg("hello 2").event_id(event_id!("$2")))
+                .add_timeline_event(f.text_msg("hello 3").event_id(event_id!("$3")))
+                .add_receipt(
+                    f.read_receipts()
+                        .add(
+                            event_id!("$2"),
+                            own_user_id,
+                            ReceiptType::Read,
+                            ReceiptThread::Unthreaded,
+                        )
+                        .into_event(),
+                ),
+        )
+        .await;
+
+    // (one vector diff update, one read receipt update)
+    assert_let_timeout!(Ok(_) = room_cache_updates.recv());
+    assert_let_timeout!(Ok(_) = room_cache_updates.recv());
+
+    // The message counts are properly updated (one new message unread after $2).
+    assert_eq!(room.num_unread_messages(), 1);
+
+    // Provided a sync with one new message from Bob in the same room,
+    server
+        .sync_room(
+            &client,
+            JoinedRoomBuilder::new(room_id)
+                .add_timeline_event(f.text_msg("hello 4").event_id(event_id!("$4"))),
+        )
+        .await;
+
+    assert_let_timeout!(Ok(_) = room_cache_updates.recv());
+
+    // The message counts are properly updated (two messages after $2).
+    assert_eq!(room.num_unread_messages(), 2);
 }

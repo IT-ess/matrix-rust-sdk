@@ -8,6 +8,8 @@ All notable changes to this project will be documented in this file.
 
 ### Bug Fixes
 
+- Added `android_platform.rs` for fixing the `rustls` integration on Android, which was broken. 
+  ([#6306](https://github.com/matrix-org/matrix-rust-sdk/pull/6306)) 
 - [**breaking**] `OtherState` properly supports redacted events that still have fields in the
   content. The following fields are no longer optional:
   - `federate` in `OtherState::RoomCreate`.
@@ -36,6 +38,15 @@ All notable changes to this project will be documented in this file.
 
 ### Features
 
+- [**breaking**] Move `LiveLocation` out of `TimelineItemContent` and into `MsgLikeKind`
+  so it has access to `MsgLikeContent` `reactions`.
+  ([#6286](https://github.com/matrix-org/matrix-rust-sdk/pull/6286))
+- Add `HumanQrLoginError::UnsupportedQrCodeType` for when a QR is parseable but cannot be used to
+  complete a login.
+  ([#6141](https://github.com/matrix-org/matrix-rust-sdk/pull/6285)
+- Add `HumanQrGrantLoginError::UnsupportedQrCodeType` for when a QR is parseable but cannot be used
+  to grant a login.
+  ([#6141](https://github.com/matrix-org/matrix-rust-sdk/pull/6285)
 - Add the `QrCodeData::base_url` and `QrCodeData::intent` methods.
   ([#6283](https://github.com/matrix-org/matrix-rust-sdk/pull/6283))
 - Add `Encryption::recover_and_fix_backup` to automatically fix key storage backup if the
@@ -104,6 +115,8 @@ All notable changes to this project will be documented in this file.
 
 ### Refactor
 
+- `Client::new` no longer unnecessarily instantiates an `OAuth` component if `CrossProcessLockConfig::SingleProcess` 
+  is used. ([#6293](https://github.com/matrix-org/matrix-rust-sdk/pull/6293))
 - [**breaking**] `Room::report_content()` no longer takes a `score` argument, because it was
   removed from the Matrix specification.
   ([#6256](https://github.com/matrix-org/matrix-rust-sdk/pull/6256))

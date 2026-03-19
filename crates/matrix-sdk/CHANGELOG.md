@@ -8,6 +8,16 @@ All notable changes to this project will be documented in this file.
 
 ### Features
 
+- The `beacon_info` start event ([MSC3672](https://github.com/matrix-org/matrix-spec-proposals/pull/3672))
+  is now included when computing the latest event for a room, so live location sharing
+  sessions can be surfaced as a room's most recent activity.
+  ([#6295](https://github.com/matrix-org/matrix-rust-sdk/pull/6295))
+- [**breaking**] The `EventCacheError` is now `Clone`able, which implied marking a few other error
+  types as `Clone`able, and wrapping a few other error variants with `Arc`.
+  ([#6305](https://github.com/matrix-org/matrix-rust-sdk/pull/6305))
+- The scopes sent when logging in with the `OAuth` API now use the stable prefix defined in the
+  specification.
+  ([#6291](https://github.com/matrix-org/matrix-rust-sdk/pull/6291))
 - [**breaking**]: The unread count computation has now moved from the sliding sync processing, to
   the event cache. As a result, it is necessary to enable the event cache if you want to keep a
   precise unread counts, using `Client::event_cache().subscribe()`. The unread counts will now also
@@ -79,6 +89,11 @@ All notable changes to this project will be documented in this file.
 
 ### Bugfix
 
+- Room keys are now rotated whenever the client receives an `m.room.member` event not belonging
+  to the current user with `leave` membership in order to prevent
+  [MSC4268](https://github.com/matrix-org/matrix-spec-proposals/pull/4268) from leaking room keys
+  in an unintuitive manner.
+  ([#6292](https://github.com/matrix-org/matrix-rust-sdk/pull/6292))
 - Only share historic room keys on invite if the current room history is shared.
   ([#6275](https://github.com/matrix-org/matrix-rust-sdk/pull/6275))
 - The event cache's thread subscriptions background task won't enable if the server doesn't
@@ -102,9 +117,13 @@ All notable changes to this project will be documented in this file.
 - Allow granting of QR login to a new client whose device ID is not a base64
   encoded Curve25519 public key.
   ([#5940](https://github.com/matrix-org/matrix-rust-sdk/pull/5940))
+- Remove an unwrap in `SlidingSync::send_sync_request` when an asynchronous task panics or is cancelled.
+  ([#6316](https://github.com/matrix-org/matrix-rust-sdk/pull/6316))
 
 ### Refactor
 
+- [**breaking**] `RoomEventCache::thread_pagination` is now async and fallible.
+  ([#6280](https://github.com/matrix-org/matrix-rust-sdk/pull/6280))
 - [**breaking**] The `UrlOrQuery` enum was moved from the `authentication::oauth`
   module to the `utils` module. It can also be converted from a `QueryString`.
   ([#6224](https://github.com/matrix-org/matrix-rust-sdk/pull/6224))
