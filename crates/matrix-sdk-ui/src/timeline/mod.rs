@@ -79,7 +79,7 @@ mod subscriber;
 mod tasks;
 #[cfg(test)]
 mod tests;
-pub mod threads;
+pub mod thread_list_service;
 mod traits;
 mod virtual_item;
 
@@ -99,6 +99,7 @@ pub use self::{
     },
     item::{TimelineItem, TimelineItemKind, TimelineUniqueId},
     latest_event::{LatestEventValue, LatestEventValueLocalState},
+    thread_list_service::{ThreadListPaginationState, ThreadListService},
     traits::RoomExt,
     virtual_item::VirtualTimelineItem,
 };
@@ -887,11 +888,9 @@ impl Timeline {
 #[derive(Debug)]
 struct TimelineDropHandle {
     _room_update_join_handle: BackgroundTaskHandle,
-    _pinned_events_join_handle: Option<BackgroundTaskHandle>,
-    _event_focused_join_handle: Option<BackgroundTaskHandle>,
-    _thread_update_join_handle: Option<BackgroundTaskHandle>,
     _local_echo_listener_handle: BackgroundTaskHandle,
     _event_cache_drop_handle: Arc<EventCacheDropHandles>,
+    _focus_drop_handle: Option<BackgroundTaskHandle>,
     _crypto_drop_handles: CryptoDropHandles,
 }
 
