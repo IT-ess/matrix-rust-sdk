@@ -16,18 +16,19 @@ use std::{
     borrow::Borrow,
     collections::{BTreeMap, BTreeSet, HashMap},
     fmt,
+    ops::Deref,
     sync::Arc,
 };
 
 use as_variant::as_variant;
 use async_trait::async_trait;
 use growable_bloom_filter::GrowableBloom;
-use matrix_sdk_common::AsyncTraitDeps;
+use matrix_sdk_common::{AsyncTraitDeps, ttl::TtlValue};
 use ruma::{
     EventId, MilliSecondsSinceUnixEpoch, OwnedEventId, OwnedMxcUri, OwnedRoomId,
     OwnedTransactionId, OwnedUserId, RoomId, TransactionId, UserId,
     api::{
-        SupportedVersions,
+        MatrixVersion, SupportedVersions,
         client::discovery::{
             discover_homeserver::{
                 self, HomeserverInfo, IdentityServerInfo, RtcFocusInfo, TileServerInfo,
@@ -44,9 +45,10 @@ use ruma::{
         receipt::{Receipt, ReceiptThread, ReceiptType},
     },
     serde::Raw,
-    time::SystemTime,
 };
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
+use tokio::sync::{Mutex, MutexGuard};
 
 use super::{
     ChildTransactionId, DependentQueuedRequest, DependentQueuedRequestKind, QueueWedgeError,
@@ -527,6 +529,606 @@ pub trait StateStore: AsyncTraitDeps {
     async fn get_size(&self) -> Result<Option<usize>, Self::Error>;
 }
 
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
+impl<T: StateStore> StateStore for &T {
+    type Error = T::Error;
+
+    async fn get_kv_data(
+        &self,
+        key: StateStoreDataKey<'_>,
+    ) -> Result<Option<StateStoreDataValue>, Self::Error> {
+        (*self).get_kv_data(key).await
+    }
+
+    async fn set_kv_data(
+        &self,
+        key: StateStoreDataKey<'_>,
+        value: StateStoreDataValue,
+    ) -> Result<(), Self::Error> {
+        (*self).set_kv_data(key, value).await
+    }
+
+    async fn remove_kv_data(&self, key: StateStoreDataKey<'_>) -> Result<(), Self::Error> {
+        (*self).remove_kv_data(key).await
+    }
+
+    async fn save_changes(&self, changes: &StateChanges) -> Result<(), Self::Error> {
+        (*self).save_changes(changes).await
+    }
+
+    async fn get_presence_event(
+        &self,
+        user_id: &UserId,
+    ) -> Result<Option<Raw<PresenceEvent>>, Self::Error> {
+        (*self).get_presence_event(user_id).await
+    }
+
+    async fn get_presence_events(
+        &self,
+        user_ids: &[OwnedUserId],
+    ) -> Result<Vec<Raw<PresenceEvent>>, Self::Error> {
+        (*self).get_presence_events(user_ids).await
+    }
+
+    async fn get_state_event(
+        &self,
+        room_id: &RoomId,
+        event_type: StateEventType,
+        state_key: &str,
+    ) -> Result<Option<RawAnySyncOrStrippedState>, Self::Error> {
+        (*self).get_state_event(room_id, event_type, state_key).await
+    }
+
+    async fn get_state_events(
+        &self,
+        room_id: &RoomId,
+        event_type: StateEventType,
+    ) -> Result<Vec<RawAnySyncOrStrippedState>, Self::Error> {
+        (*self).get_state_events(room_id, event_type).await
+    }
+
+    async fn get_state_events_for_keys(
+        &self,
+        room_id: &RoomId,
+        event_type: StateEventType,
+        state_keys: &[&str],
+    ) -> Result<Vec<RawAnySyncOrStrippedState>, Self::Error> {
+        (*self).get_state_events_for_keys(room_id, event_type, state_keys).await
+    }
+
+    async fn get_profile(
+        &self,
+        room_id: &RoomId,
+        user_id: &UserId,
+    ) -> Result<Option<MinimalRoomMemberEvent>, Self::Error> {
+        (*self).get_profile(room_id, user_id).await
+    }
+
+    async fn get_profiles<'a>(
+        &self,
+        room_id: &RoomId,
+        user_ids: &'a [OwnedUserId],
+    ) -> Result<BTreeMap<&'a UserId, MinimalRoomMemberEvent>, Self::Error> {
+        (*self).get_profiles(room_id, user_ids).await
+    }
+
+    async fn get_user_ids(
+        &self,
+        room_id: &RoomId,
+        memberships: RoomMemberships,
+    ) -> Result<Vec<OwnedUserId>, Self::Error> {
+        (*self).get_user_ids(room_id, memberships).await
+    }
+
+    async fn get_room_infos(
+        &self,
+        room_load_settings: &RoomLoadSettings,
+    ) -> Result<Vec<RoomInfo>, Self::Error> {
+        (*self).get_room_infos(room_load_settings).await
+    }
+
+    async fn get_users_with_display_name(
+        &self,
+        room_id: &RoomId,
+        display_name: &DisplayName,
+    ) -> Result<BTreeSet<OwnedUserId>, Self::Error> {
+        (*self).get_users_with_display_name(room_id, display_name).await
+    }
+
+    async fn get_users_with_display_names<'a>(
+        &self,
+        room_id: &RoomId,
+        display_names: &'a [DisplayName],
+    ) -> Result<HashMap<&'a DisplayName, BTreeSet<OwnedUserId>>, Self::Error> {
+        (*self).get_users_with_display_names(room_id, display_names).await
+    }
+
+    async fn get_account_data_event(
+        &self,
+        event_type: GlobalAccountDataEventType,
+    ) -> Result<Option<Raw<AnyGlobalAccountDataEvent>>, Self::Error> {
+        (*self).get_account_data_event(event_type).await
+    }
+
+    async fn get_room_account_data_event(
+        &self,
+        room_id: &RoomId,
+        event_type: RoomAccountDataEventType,
+    ) -> Result<Option<Raw<AnyRoomAccountDataEvent>>, Self::Error> {
+        (*self).get_room_account_data_event(room_id, event_type).await
+    }
+
+    async fn get_user_room_receipt_event(
+        &self,
+        room_id: &RoomId,
+        receipt_type: ReceiptType,
+        thread: ReceiptThread,
+        user_id: &UserId,
+    ) -> Result<Option<(OwnedEventId, Receipt)>, Self::Error> {
+        (*self).get_user_room_receipt_event(room_id, receipt_type, thread, user_id).await
+    }
+
+    async fn get_event_room_receipt_events(
+        &self,
+        room_id: &RoomId,
+        receipt_type: ReceiptType,
+        thread: ReceiptThread,
+        event_id: &EventId,
+    ) -> Result<Vec<(OwnedUserId, Receipt)>, Self::Error> {
+        (*self).get_event_room_receipt_events(room_id, receipt_type, thread, event_id).await
+    }
+
+    async fn get_custom_value(&self, key: &[u8]) -> Result<Option<Vec<u8>>, Self::Error> {
+        (*self).get_custom_value(key).await
+    }
+
+    async fn set_custom_value(
+        &self,
+        key: &[u8],
+        value: Vec<u8>,
+    ) -> Result<Option<Vec<u8>>, Self::Error> {
+        (*self).set_custom_value(key, value).await
+    }
+
+    async fn remove_custom_value(&self, key: &[u8]) -> Result<Option<Vec<u8>>, Self::Error> {
+        (*self).remove_custom_value(key).await
+    }
+
+    async fn remove_room(&self, room_id: &RoomId) -> Result<(), Self::Error> {
+        (*self).remove_room(room_id).await
+    }
+
+    async fn save_send_queue_request(
+        &self,
+        room_id: &RoomId,
+        transaction_id: OwnedTransactionId,
+        created_at: MilliSecondsSinceUnixEpoch,
+        request: QueuedRequestKind,
+        priority: usize,
+    ) -> Result<(), Self::Error> {
+        (*self)
+            .save_send_queue_request(room_id, transaction_id, created_at, request, priority)
+            .await
+    }
+
+    async fn update_send_queue_request(
+        &self,
+        room_id: &RoomId,
+        transaction_id: &TransactionId,
+        content: QueuedRequestKind,
+    ) -> Result<bool, Self::Error> {
+        (*self).update_send_queue_request(room_id, transaction_id, content).await
+    }
+
+    async fn remove_send_queue_request(
+        &self,
+        room_id: &RoomId,
+        transaction_id: &TransactionId,
+    ) -> Result<bool, Self::Error> {
+        (*self).remove_send_queue_request(room_id, transaction_id).await
+    }
+
+    async fn load_send_queue_requests(
+        &self,
+        room_id: &RoomId,
+    ) -> Result<Vec<QueuedRequest>, Self::Error> {
+        (*self).load_send_queue_requests(room_id).await
+    }
+
+    async fn update_send_queue_request_status(
+        &self,
+        room_id: &RoomId,
+        transaction_id: &TransactionId,
+        error: Option<QueueWedgeError>,
+    ) -> Result<(), Self::Error> {
+        (*self).update_send_queue_request_status(room_id, transaction_id, error).await
+    }
+
+    async fn load_rooms_with_unsent_requests(&self) -> Result<Vec<OwnedRoomId>, Self::Error> {
+        (*self).load_rooms_with_unsent_requests().await
+    }
+
+    async fn save_dependent_queued_request(
+        &self,
+        room_id: &RoomId,
+        parent_txn_id: &TransactionId,
+        own_txn_id: ChildTransactionId,
+        created_at: MilliSecondsSinceUnixEpoch,
+        content: DependentQueuedRequestKind,
+    ) -> Result<(), Self::Error> {
+        (*self)
+            .save_dependent_queued_request(room_id, parent_txn_id, own_txn_id, created_at, content)
+            .await
+    }
+
+    async fn mark_dependent_queued_requests_as_ready(
+        &self,
+        room_id: &RoomId,
+        parent_txn_id: &TransactionId,
+        sent_parent_key: SentRequestKey,
+    ) -> Result<usize, Self::Error> {
+        (*self)
+            .mark_dependent_queued_requests_as_ready(room_id, parent_txn_id, sent_parent_key)
+            .await
+    }
+
+    async fn update_dependent_queued_request(
+        &self,
+        room_id: &RoomId,
+        own_transaction_id: &ChildTransactionId,
+        new_content: DependentQueuedRequestKind,
+    ) -> Result<bool, Self::Error> {
+        (*self).update_dependent_queued_request(room_id, own_transaction_id, new_content).await
+    }
+
+    async fn remove_dependent_queued_request(
+        &self,
+        room: &RoomId,
+        own_txn_id: &ChildTransactionId,
+    ) -> Result<bool, Self::Error> {
+        (*self).remove_dependent_queued_request(room, own_txn_id).await
+    }
+
+    async fn load_dependent_queued_requests(
+        &self,
+        room: &RoomId,
+    ) -> Result<Vec<DependentQueuedRequest>, Self::Error> {
+        (*self).load_dependent_queued_requests(room).await
+    }
+
+    async fn upsert_thread_subscriptions(
+        &self,
+        updates: Vec<(&RoomId, &EventId, StoredThreadSubscription)>,
+    ) -> Result<(), Self::Error> {
+        (*self).upsert_thread_subscriptions(updates).await
+    }
+
+    async fn remove_thread_subscription(
+        &self,
+        room: &RoomId,
+        thread_id: &EventId,
+    ) -> Result<(), Self::Error> {
+        (*self).remove_thread_subscription(room, thread_id).await
+    }
+
+    async fn load_thread_subscription(
+        &self,
+        room: &RoomId,
+        thread_id: &EventId,
+    ) -> Result<Option<StoredThreadSubscription>, Self::Error> {
+        (*self).load_thread_subscription(room, thread_id).await
+    }
+
+    async fn optimize(&self) -> Result<(), Self::Error> {
+        (*self).optimize().await
+    }
+
+    async fn get_size(&self) -> Result<Option<usize>, Self::Error> {
+        (*self).get_size().await
+    }
+}
+
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
+impl<T: StateStore + ?Sized> StateStore for Arc<T> {
+    type Error = T::Error;
+
+    async fn get_kv_data(
+        &self,
+        key: StateStoreDataKey<'_>,
+    ) -> Result<Option<StateStoreDataValue>, Self::Error> {
+        self.deref().get_kv_data(key).await
+    }
+
+    async fn set_kv_data(
+        &self,
+        key: StateStoreDataKey<'_>,
+        value: StateStoreDataValue,
+    ) -> Result<(), Self::Error> {
+        self.deref().set_kv_data(key, value).await
+    }
+
+    async fn remove_kv_data(&self, key: StateStoreDataKey<'_>) -> Result<(), Self::Error> {
+        self.deref().remove_kv_data(key).await
+    }
+
+    async fn save_changes(&self, changes: &StateChanges) -> Result<(), Self::Error> {
+        self.deref().save_changes(changes).await
+    }
+
+    async fn get_presence_event(
+        &self,
+        user_id: &UserId,
+    ) -> Result<Option<Raw<PresenceEvent>>, Self::Error> {
+        self.deref().get_presence_event(user_id).await
+    }
+
+    async fn get_presence_events(
+        &self,
+        user_ids: &[OwnedUserId],
+    ) -> Result<Vec<Raw<PresenceEvent>>, Self::Error> {
+        self.deref().get_presence_events(user_ids).await
+    }
+
+    async fn get_state_event(
+        &self,
+        room_id: &RoomId,
+        event_type: StateEventType,
+        state_key: &str,
+    ) -> Result<Option<RawAnySyncOrStrippedState>, Self::Error> {
+        self.deref().get_state_event(room_id, event_type, state_key).await
+    }
+
+    async fn get_state_events(
+        &self,
+        room_id: &RoomId,
+        event_type: StateEventType,
+    ) -> Result<Vec<RawAnySyncOrStrippedState>, Self::Error> {
+        self.deref().get_state_events(room_id, event_type).await
+    }
+
+    async fn get_state_events_for_keys(
+        &self,
+        room_id: &RoomId,
+        event_type: StateEventType,
+        state_keys: &[&str],
+    ) -> Result<Vec<RawAnySyncOrStrippedState>, Self::Error> {
+        self.deref().get_state_events_for_keys(room_id, event_type, state_keys).await
+    }
+
+    async fn get_profile(
+        &self,
+        room_id: &RoomId,
+        user_id: &UserId,
+    ) -> Result<Option<MinimalRoomMemberEvent>, Self::Error> {
+        self.deref().get_profile(room_id, user_id).await
+    }
+
+    async fn get_profiles<'a>(
+        &self,
+        room_id: &RoomId,
+        user_ids: &'a [OwnedUserId],
+    ) -> Result<BTreeMap<&'a UserId, MinimalRoomMemberEvent>, Self::Error> {
+        self.deref().get_profiles(room_id, user_ids).await
+    }
+
+    async fn get_user_ids(
+        &self,
+        room_id: &RoomId,
+        memberships: RoomMemberships,
+    ) -> Result<Vec<OwnedUserId>, Self::Error> {
+        self.deref().get_user_ids(room_id, memberships).await
+    }
+
+    async fn get_room_infos(
+        &self,
+        room_load_settings: &RoomLoadSettings,
+    ) -> Result<Vec<RoomInfo>, Self::Error> {
+        self.deref().get_room_infos(room_load_settings).await
+    }
+
+    async fn get_users_with_display_name(
+        &self,
+        room_id: &RoomId,
+        display_name: &DisplayName,
+    ) -> Result<BTreeSet<OwnedUserId>, Self::Error> {
+        self.deref().get_users_with_display_name(room_id, display_name).await
+    }
+
+    async fn get_users_with_display_names<'a>(
+        &self,
+        room_id: &RoomId,
+        display_names: &'a [DisplayName],
+    ) -> Result<HashMap<&'a DisplayName, BTreeSet<OwnedUserId>>, Self::Error> {
+        self.deref().get_users_with_display_names(room_id, display_names).await
+    }
+
+    async fn get_account_data_event(
+        &self,
+        event_type: GlobalAccountDataEventType,
+    ) -> Result<Option<Raw<AnyGlobalAccountDataEvent>>, Self::Error> {
+        self.deref().get_account_data_event(event_type).await
+    }
+
+    async fn get_room_account_data_event(
+        &self,
+        room_id: &RoomId,
+        event_type: RoomAccountDataEventType,
+    ) -> Result<Option<Raw<AnyRoomAccountDataEvent>>, Self::Error> {
+        self.deref().get_room_account_data_event(room_id, event_type).await
+    }
+
+    async fn get_user_room_receipt_event(
+        &self,
+        room_id: &RoomId,
+        receipt_type: ReceiptType,
+        thread: ReceiptThread,
+        user_id: &UserId,
+    ) -> Result<Option<(OwnedEventId, Receipt)>, Self::Error> {
+        self.deref().get_user_room_receipt_event(room_id, receipt_type, thread, user_id).await
+    }
+
+    async fn get_event_room_receipt_events(
+        &self,
+        room_id: &RoomId,
+        receipt_type: ReceiptType,
+        thread: ReceiptThread,
+        event_id: &EventId,
+    ) -> Result<Vec<(OwnedUserId, Receipt)>, Self::Error> {
+        self.deref().get_event_room_receipt_events(room_id, receipt_type, thread, event_id).await
+    }
+
+    async fn get_custom_value(&self, key: &[u8]) -> Result<Option<Vec<u8>>, Self::Error> {
+        self.deref().get_custom_value(key).await
+    }
+
+    async fn set_custom_value(
+        &self,
+        key: &[u8],
+        value: Vec<u8>,
+    ) -> Result<Option<Vec<u8>>, Self::Error> {
+        self.deref().set_custom_value(key, value).await
+    }
+
+    async fn remove_custom_value(&self, key: &[u8]) -> Result<Option<Vec<u8>>, Self::Error> {
+        self.deref().remove_custom_value(key).await
+    }
+
+    async fn remove_room(&self, room_id: &RoomId) -> Result<(), Self::Error> {
+        self.deref().remove_room(room_id).await
+    }
+
+    async fn save_send_queue_request(
+        &self,
+        room_id: &RoomId,
+        transaction_id: OwnedTransactionId,
+        created_at: MilliSecondsSinceUnixEpoch,
+        request: QueuedRequestKind,
+        priority: usize,
+    ) -> Result<(), Self::Error> {
+        self.deref()
+            .save_send_queue_request(room_id, transaction_id, created_at, request, priority)
+            .await
+    }
+
+    async fn update_send_queue_request(
+        &self,
+        room_id: &RoomId,
+        transaction_id: &TransactionId,
+        content: QueuedRequestKind,
+    ) -> Result<bool, Self::Error> {
+        self.deref().update_send_queue_request(room_id, transaction_id, content).await
+    }
+
+    async fn remove_send_queue_request(
+        &self,
+        room_id: &RoomId,
+        transaction_id: &TransactionId,
+    ) -> Result<bool, Self::Error> {
+        self.deref().remove_send_queue_request(room_id, transaction_id).await
+    }
+
+    async fn load_send_queue_requests(
+        &self,
+        room_id: &RoomId,
+    ) -> Result<Vec<QueuedRequest>, Self::Error> {
+        self.deref().load_send_queue_requests(room_id).await
+    }
+
+    async fn update_send_queue_request_status(
+        &self,
+        room_id: &RoomId,
+        transaction_id: &TransactionId,
+        error: Option<QueueWedgeError>,
+    ) -> Result<(), Self::Error> {
+        self.deref().update_send_queue_request_status(room_id, transaction_id, error).await
+    }
+
+    async fn load_rooms_with_unsent_requests(&self) -> Result<Vec<OwnedRoomId>, Self::Error> {
+        self.deref().load_rooms_with_unsent_requests().await
+    }
+
+    async fn save_dependent_queued_request(
+        &self,
+        room_id: &RoomId,
+        parent_txn_id: &TransactionId,
+        own_txn_id: ChildTransactionId,
+        created_at: MilliSecondsSinceUnixEpoch,
+        content: DependentQueuedRequestKind,
+    ) -> Result<(), Self::Error> {
+        self.deref()
+            .save_dependent_queued_request(room_id, parent_txn_id, own_txn_id, created_at, content)
+            .await
+    }
+
+    async fn mark_dependent_queued_requests_as_ready(
+        &self,
+        room_id: &RoomId,
+        parent_txn_id: &TransactionId,
+        sent_parent_key: SentRequestKey,
+    ) -> Result<usize, Self::Error> {
+        self.deref()
+            .mark_dependent_queued_requests_as_ready(room_id, parent_txn_id, sent_parent_key)
+            .await
+    }
+
+    async fn update_dependent_queued_request(
+        &self,
+        room_id: &RoomId,
+        own_transaction_id: &ChildTransactionId,
+        new_content: DependentQueuedRequestKind,
+    ) -> Result<bool, Self::Error> {
+        self.deref().update_dependent_queued_request(room_id, own_transaction_id, new_content).await
+    }
+
+    async fn remove_dependent_queued_request(
+        &self,
+        room: &RoomId,
+        own_txn_id: &ChildTransactionId,
+    ) -> Result<bool, Self::Error> {
+        self.deref().remove_dependent_queued_request(room, own_txn_id).await
+    }
+
+    async fn load_dependent_queued_requests(
+        &self,
+        room: &RoomId,
+    ) -> Result<Vec<DependentQueuedRequest>, Self::Error> {
+        self.deref().load_dependent_queued_requests(room).await
+    }
+
+    async fn upsert_thread_subscriptions(
+        &self,
+        updates: Vec<(&RoomId, &EventId, StoredThreadSubscription)>,
+    ) -> Result<(), Self::Error> {
+        self.deref().upsert_thread_subscriptions(updates).await
+    }
+
+    async fn remove_thread_subscription(
+        &self,
+        room: &RoomId,
+        thread_id: &EventId,
+    ) -> Result<(), Self::Error> {
+        self.deref().remove_thread_subscription(room, thread_id).await
+    }
+
+    async fn load_thread_subscription(
+        &self,
+        room: &RoomId,
+        thread_id: &EventId,
+    ) -> Result<Option<StoredThreadSubscription>, Self::Error> {
+        self.deref().load_thread_subscription(room, thread_id).await
+    }
+
+    async fn optimize(&self) -> Result<(), Self::Error> {
+        self.deref().optimize().await
+    }
+
+    async fn get_size(&self) -> Result<Option<usize>, Self::Error> {
+        self.deref().get_size().await
+    }
+}
+
 #[repr(transparent)]
 struct EraseStateStoreError<T>(T);
 
@@ -852,6 +1454,359 @@ impl<T: StateStore> StateStore for EraseStateStoreError<T> {
     }
 }
 
+/// A wrapper around a [`StateStore`] that supports synchronizing calls to
+/// [`StateStore::save_changes`].
+#[derive(Debug, Clone)]
+pub struct SaveLockedStateStore<T = Arc<DynStateStore>> {
+    store: T,
+    lock: Arc<Mutex<()>>,
+}
+
+/// An error type that represents a scenario where a [`MutexGuard`] provided to
+/// a function does not reference the underlying [`Mutex`] in the enclosing
+/// [`SaveLockedStateStore`].
+#[derive(Debug, Error)]
+#[error("a mutex guard was provided, but it does not reference the correct mutex")]
+pub struct IncorrectMutexGuardError;
+
+impl From<IncorrectMutexGuardError> for StoreError {
+    fn from(value: IncorrectMutexGuardError) -> Self {
+        Self::backend(value)
+    }
+}
+
+impl<T> SaveLockedStateStore<T> {
+    /// Creates a new [`SaveLockedStateStore`] with the provided store.
+    pub fn new(store: T) -> Self {
+        Self { store, lock: Arc::new(Mutex::new(())) }
+    }
+
+    /// Returns a reference to the underlying [`Mutex`] used to synchronize
+    /// calls to [`StateStore::save_changes`].
+    pub fn lock(&self) -> &Mutex<()> {
+        self.lock.as_ref()
+    }
+}
+
+impl<T: StateStore> SaveLockedStateStore<T> {
+    /// Provides a means of calling [`StateStore::save_changes`] when the caller
+    /// has already acquired the underlying [`Mutex`]. Returns an error if
+    /// the [`MutexGuard`] provided does not reference the underlying
+    /// [`Mutex`].
+    pub async fn save_changes_with_guard(
+        &self,
+        guard: &MutexGuard<'_, ()>,
+        changes: &StateChanges,
+    ) -> Result<(), StoreError> {
+        if !std::ptr::eq(MutexGuard::mutex(guard), self.lock()) {
+            Err(IncorrectMutexGuardError.into())
+        } else {
+            self.store.save_changes(changes).await.map_err(Into::into)
+        }
+    }
+}
+
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
+impl<T: StateStore> StateStore for SaveLockedStateStore<T> {
+    type Error = T::Error;
+
+    async fn get_kv_data(
+        &self,
+        key: StateStoreDataKey<'_>,
+    ) -> Result<Option<StateStoreDataValue>, Self::Error> {
+        self.store.get_kv_data(key).await
+    }
+
+    async fn set_kv_data(
+        &self,
+        key: StateStoreDataKey<'_>,
+        value: StateStoreDataValue,
+    ) -> Result<(), Self::Error> {
+        self.store.set_kv_data(key, value).await
+    }
+
+    async fn remove_kv_data(&self, key: StateStoreDataKey<'_>) -> Result<(), Self::Error> {
+        self.store.remove_kv_data(key).await
+    }
+
+    async fn save_changes(&self, changes: &StateChanges) -> Result<(), Self::Error> {
+        let _guard = self.lock.lock().await;
+        self.store.save_changes(changes).await
+    }
+
+    async fn get_presence_event(
+        &self,
+        user_id: &UserId,
+    ) -> Result<Option<Raw<PresenceEvent>>, Self::Error> {
+        self.store.get_presence_event(user_id).await
+    }
+
+    async fn get_presence_events(
+        &self,
+        user_ids: &[OwnedUserId],
+    ) -> Result<Vec<Raw<PresenceEvent>>, Self::Error> {
+        self.store.get_presence_events(user_ids).await
+    }
+
+    async fn get_state_event(
+        &self,
+        room_id: &RoomId,
+        event_type: StateEventType,
+        state_key: &str,
+    ) -> Result<Option<RawAnySyncOrStrippedState>, Self::Error> {
+        self.store.get_state_event(room_id, event_type, state_key).await
+    }
+
+    async fn get_state_events(
+        &self,
+        room_id: &RoomId,
+        event_type: StateEventType,
+    ) -> Result<Vec<RawAnySyncOrStrippedState>, Self::Error> {
+        self.store.get_state_events(room_id, event_type).await
+    }
+
+    async fn get_state_events_for_keys(
+        &self,
+        room_id: &RoomId,
+        event_type: StateEventType,
+        state_keys: &[&str],
+    ) -> Result<Vec<RawAnySyncOrStrippedState>, Self::Error> {
+        self.store.get_state_events_for_keys(room_id, event_type, state_keys).await
+    }
+
+    async fn get_profile(
+        &self,
+        room_id: &RoomId,
+        user_id: &UserId,
+    ) -> Result<Option<MinimalRoomMemberEvent>, Self::Error> {
+        self.store.get_profile(room_id, user_id).await
+    }
+
+    async fn get_profiles<'a>(
+        &self,
+        room_id: &RoomId,
+        user_ids: &'a [OwnedUserId],
+    ) -> Result<BTreeMap<&'a UserId, MinimalRoomMemberEvent>, Self::Error> {
+        self.store.get_profiles(room_id, user_ids).await
+    }
+
+    async fn get_user_ids(
+        &self,
+        room_id: &RoomId,
+        memberships: RoomMemberships,
+    ) -> Result<Vec<OwnedUserId>, Self::Error> {
+        self.store.get_user_ids(room_id, memberships).await
+    }
+
+    async fn get_room_infos(
+        &self,
+        room_load_settings: &RoomLoadSettings,
+    ) -> Result<Vec<RoomInfo>, Self::Error> {
+        self.store.get_room_infos(room_load_settings).await
+    }
+
+    async fn get_users_with_display_name(
+        &self,
+        room_id: &RoomId,
+        display_name: &DisplayName,
+    ) -> Result<BTreeSet<OwnedUserId>, Self::Error> {
+        self.store.get_users_with_display_name(room_id, display_name).await
+    }
+
+    async fn get_users_with_display_names<'a>(
+        &self,
+        room_id: &RoomId,
+        display_names: &'a [DisplayName],
+    ) -> Result<HashMap<&'a DisplayName, BTreeSet<OwnedUserId>>, Self::Error> {
+        self.store.get_users_with_display_names(room_id, display_names).await
+    }
+
+    async fn get_account_data_event(
+        &self,
+        event_type: GlobalAccountDataEventType,
+    ) -> Result<Option<Raw<AnyGlobalAccountDataEvent>>, Self::Error> {
+        self.store.get_account_data_event(event_type).await
+    }
+
+    async fn get_room_account_data_event(
+        &self,
+        room_id: &RoomId,
+        event_type: RoomAccountDataEventType,
+    ) -> Result<Option<Raw<AnyRoomAccountDataEvent>>, Self::Error> {
+        self.store.get_room_account_data_event(room_id, event_type).await
+    }
+
+    async fn get_user_room_receipt_event(
+        &self,
+        room_id: &RoomId,
+        receipt_type: ReceiptType,
+        thread: ReceiptThread,
+        user_id: &UserId,
+    ) -> Result<Option<(OwnedEventId, Receipt)>, Self::Error> {
+        self.store.get_user_room_receipt_event(room_id, receipt_type, thread, user_id).await
+    }
+
+    async fn get_event_room_receipt_events(
+        &self,
+        room_id: &RoomId,
+        receipt_type: ReceiptType,
+        thread: ReceiptThread,
+        event_id: &EventId,
+    ) -> Result<Vec<(OwnedUserId, Receipt)>, Self::Error> {
+        self.store.get_event_room_receipt_events(room_id, receipt_type, thread, event_id).await
+    }
+
+    async fn get_custom_value(&self, key: &[u8]) -> Result<Option<Vec<u8>>, Self::Error> {
+        self.store.get_custom_value(key).await
+    }
+
+    async fn set_custom_value(
+        &self,
+        key: &[u8],
+        value: Vec<u8>,
+    ) -> Result<Option<Vec<u8>>, Self::Error> {
+        self.store.set_custom_value(key, value).await
+    }
+
+    async fn remove_custom_value(&self, key: &[u8]) -> Result<Option<Vec<u8>>, Self::Error> {
+        self.store.remove_custom_value(key).await
+    }
+
+    async fn remove_room(&self, room_id: &RoomId) -> Result<(), Self::Error> {
+        self.store.remove_room(room_id).await
+    }
+
+    async fn save_send_queue_request(
+        &self,
+        room_id: &RoomId,
+        transaction_id: OwnedTransactionId,
+        created_at: MilliSecondsSinceUnixEpoch,
+        request: QueuedRequestKind,
+        priority: usize,
+    ) -> Result<(), Self::Error> {
+        self.store
+            .save_send_queue_request(room_id, transaction_id, created_at, request, priority)
+            .await
+    }
+
+    async fn update_send_queue_request(
+        &self,
+        room_id: &RoomId,
+        transaction_id: &TransactionId,
+        content: QueuedRequestKind,
+    ) -> Result<bool, Self::Error> {
+        self.store.update_send_queue_request(room_id, transaction_id, content).await
+    }
+
+    async fn remove_send_queue_request(
+        &self,
+        room_id: &RoomId,
+        transaction_id: &TransactionId,
+    ) -> Result<bool, Self::Error> {
+        self.store.remove_send_queue_request(room_id, transaction_id).await
+    }
+
+    async fn load_send_queue_requests(
+        &self,
+        room_id: &RoomId,
+    ) -> Result<Vec<QueuedRequest>, Self::Error> {
+        self.store.load_send_queue_requests(room_id).await
+    }
+
+    async fn update_send_queue_request_status(
+        &self,
+        room_id: &RoomId,
+        transaction_id: &TransactionId,
+        error: Option<QueueWedgeError>,
+    ) -> Result<(), Self::Error> {
+        self.store.update_send_queue_request_status(room_id, transaction_id, error).await
+    }
+
+    async fn load_rooms_with_unsent_requests(&self) -> Result<Vec<OwnedRoomId>, Self::Error> {
+        self.store.load_rooms_with_unsent_requests().await
+    }
+
+    async fn save_dependent_queued_request(
+        &self,
+        room_id: &RoomId,
+        parent_txn_id: &TransactionId,
+        own_txn_id: ChildTransactionId,
+        created_at: MilliSecondsSinceUnixEpoch,
+        content: DependentQueuedRequestKind,
+    ) -> Result<(), Self::Error> {
+        self.store
+            .save_dependent_queued_request(room_id, parent_txn_id, own_txn_id, created_at, content)
+            .await
+    }
+
+    async fn mark_dependent_queued_requests_as_ready(
+        &self,
+        room_id: &RoomId,
+        parent_txn_id: &TransactionId,
+        sent_parent_key: SentRequestKey,
+    ) -> Result<usize, Self::Error> {
+        self.store
+            .mark_dependent_queued_requests_as_ready(room_id, parent_txn_id, sent_parent_key)
+            .await
+    }
+
+    async fn update_dependent_queued_request(
+        &self,
+        room_id: &RoomId,
+        own_transaction_id: &ChildTransactionId,
+        new_content: DependentQueuedRequestKind,
+    ) -> Result<bool, Self::Error> {
+        self.store.update_dependent_queued_request(room_id, own_transaction_id, new_content).await
+    }
+
+    async fn remove_dependent_queued_request(
+        &self,
+        room: &RoomId,
+        own_txn_id: &ChildTransactionId,
+    ) -> Result<bool, Self::Error> {
+        self.store.remove_dependent_queued_request(room, own_txn_id).await
+    }
+
+    async fn load_dependent_queued_requests(
+        &self,
+        room: &RoomId,
+    ) -> Result<Vec<DependentQueuedRequest>, Self::Error> {
+        self.store.load_dependent_queued_requests(room).await
+    }
+
+    async fn upsert_thread_subscriptions(
+        &self,
+        updates: Vec<(&RoomId, &EventId, StoredThreadSubscription)>,
+    ) -> Result<(), Self::Error> {
+        self.store.upsert_thread_subscriptions(updates).await
+    }
+
+    async fn remove_thread_subscription(
+        &self,
+        room: &RoomId,
+        thread_id: &EventId,
+    ) -> Result<(), Self::Error> {
+        self.store.remove_thread_subscription(room, thread_id).await
+    }
+
+    async fn load_thread_subscription(
+        &self,
+        room: &RoomId,
+        thread_id: &EventId,
+    ) -> Result<Option<StoredThreadSubscription>, Self::Error> {
+        self.store.load_thread_subscription(room, thread_id).await
+    }
+
+    async fn optimize(&self) -> Result<(), Self::Error> {
+        self.store.optimize().await
+    }
+
+    async fn get_size(&self) -> Result<Option<usize>, Self::Error> {
+        self.store.get_size().await
+    }
+}
+
 /// Convenience functionality for state stores.
 #[cfg_attr(target_family = "wasm", async_trait(?Send))]
 #[cfg_attr(not(target_family = "wasm"), async_trait)]
@@ -1029,52 +1984,6 @@ where
     }
 }
 
-// Turns a given `Arc<T>` into `Arc<DynStateStore>` by attaching the
-// StateStore impl vtable of `EraseStateStoreError<T>`.
-impl<T> IntoStateStore for Arc<T>
-where
-    T: StateStore + 'static,
-{
-    fn into_state_store(self) -> Arc<DynStateStore> {
-        let ptr: *const T = Arc::into_raw(self);
-        let ptr_erased = ptr as *const EraseStateStoreError<T>;
-        // SAFETY: EraseStateStoreError is repr(transparent) so T and
-        //         EraseStateStoreError<T> have the same layout and ABI
-        unsafe { Arc::from_raw(ptr_erased) }
-    }
-}
-
-/// A TTL value in the store whose data can only be accessed before it expires.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TtlStoreValue<T> {
-    /// The data of the item.
-    #[serde(flatten)]
-    data: T,
-
-    /// Last time we fetched this data from the server, in milliseconds since
-    /// epoch.
-    last_fetch_ts: f64,
-}
-
-impl<T> TtlStoreValue<T> {
-    /// The number of milliseconds after which the data is considered stale.
-    pub const STALE_THRESHOLD: f64 = (1000 * 60 * 60 * 24 * 7) as _; // seven days
-
-    /// Construct a new `TtlStoreValue` with the given data.
-    pub fn new(data: T) -> Self {
-        Self { data, last_fetch_ts: now_timestamp_ms() }
-    }
-
-    /// Get the data of this value, if it hasn't expired.
-    pub fn into_data(self) -> Option<T> {
-        if now_timestamp_ms() - self.last_fetch_ts >= Self::STALE_THRESHOLD {
-            None
-        } else {
-            Some(self.data)
-        }
-    }
-}
-
 /// Serialisable representation of get_supported_versions::Response.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SupportedVersionsResponse {
@@ -1092,7 +2001,16 @@ impl SupportedVersionsResponse {
     /// Note: Matrix versions and features that Ruma cannot parse, or does not
     /// know about, are discarded.
     pub fn supported_versions(&self) -> SupportedVersions {
-        SupportedVersions::from_parts(&self.versions, &self.unstable_features)
+        let mut supported_versions =
+            SupportedVersions::from_parts(&self.versions, &self.unstable_features);
+
+        // We need at least one supported version to be able to make requests, so we
+        // default to Matrix 1.0.
+        if supported_versions.versions.is_empty() {
+            supported_versions.versions.insert(MatrixVersion::V1_0);
+        }
+
+        supported_versions
     }
 }
 
@@ -1123,15 +2041,6 @@ impl From<discover_homeserver::Response> for WellKnownResponse {
     }
 }
 
-/// Get the current timestamp as the number of milliseconds since Unix Epoch.
-fn now_timestamp_ms() -> f64 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .expect("System clock was before 1970.")
-        .as_secs_f64()
-        * 1000.0
-}
-
 /// A value for key-value data that should be persisted into the store.
 #[derive(Debug, Clone)]
 pub enum StateStoreDataValue {
@@ -1139,10 +2048,10 @@ pub enum StateStoreDataValue {
     SyncToken(String),
 
     /// The supported versions of the server.
-    SupportedVersions(TtlStoreValue<SupportedVersionsResponse>),
+    SupportedVersions(TtlValue<SupportedVersionsResponse>),
 
     /// The well-known information of the server.
-    WellKnown(TtlStoreValue<Option<WellKnownResponse>>),
+    WellKnown(TtlValue<Option<WellKnownResponse>>),
 
     /// A filter with the given ID.
     Filter(String),
@@ -1177,7 +2086,7 @@ pub enum StateStoreDataValue {
     ThreadSubscriptionsCatchupTokens(Vec<ThreadSubscriptionCatchupToken>),
 
     /// The capabilities the homeserver supports or disables.
-    HomeserverCapabilities(Capabilities),
+    HomeserverCapabilities(TtlValue<Capabilities>),
 }
 
 /// Tokens to use when catching up on thread subscriptions.
@@ -1358,12 +2267,12 @@ impl StateStoreDataValue {
     }
 
     /// Get this value if it is the supported versions metadata.
-    pub fn into_supported_versions(self) -> Option<TtlStoreValue<SupportedVersionsResponse>> {
+    pub fn into_supported_versions(self) -> Option<TtlValue<SupportedVersionsResponse>> {
         as_variant!(self, Self::SupportedVersions)
     }
 
     /// Get this value if it is the well-known metadata.
-    pub fn into_well_known(self) -> Option<TtlStoreValue<Option<WellKnownResponse>>> {
+    pub fn into_well_known(self) -> Option<TtlValue<Option<WellKnownResponse>>> {
         as_variant!(self, Self::WellKnown)
     }
 
@@ -1382,7 +2291,7 @@ impl StateStoreDataValue {
 
     /// Get this value if it is the data for the capabilities the homeserver
     /// supports or disables.
-    pub fn into_homeserver_capabilities(self) -> Option<Capabilities> {
+    pub fn into_homeserver_capabilities(self) -> Option<TtlValue<Capabilities>> {
         as_variant!(self, Self::HomeserverCapabilities)
     }
 }
@@ -1513,44 +2422,93 @@ pub fn compare_thread_subscription_bump_stamps(
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    mod save_locked_state_store {
+        use std::time::Duration;
 
-    use super::{SupportedVersionsResponse, TtlStoreValue, now_timestamp_ms};
+        use assert_matches::assert_matches;
+        use futures_util::future::{self, Either};
+        #[cfg(all(target_family = "wasm", target_os = "unknown"))]
+        use gloo_timers::future::sleep;
+        use matrix_sdk_common::executor::spawn;
+        use matrix_sdk_test::async_test;
+        use tokio::sync::Mutex;
+        #[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
+        use tokio::time::sleep;
 
-    #[test]
-    fn test_stale_ttl_store_value() {
-        // Definitely stale.
-        let ttl_value = TtlStoreValue {
-            data: (),
-            last_fetch_ts: now_timestamp_ms() - TtlStoreValue::<()>::STALE_THRESHOLD - 1.0,
+        use crate::{
+            StateChanges, StateStore,
+            store::{IntoStateStore, MemoryStore, Result, SaveLockedStateStore},
         };
-        assert!(ttl_value.into_data().is_none());
 
-        // Definitely not stale.
-        let ttl_value = TtlStoreValue::new(());
-        assert!(ttl_value.into_data().is_some());
-    }
+        async fn get_store() -> Result<impl StateStore> {
+            Ok(SaveLockedStateStore::new(MemoryStore::new()))
+        }
 
-    #[test]
-    fn test_stale_ttl_store_value_serialize_roundtrip() {
-        let server_info = SupportedVersionsResponse {
-            versions: vec!["1.2".to_owned(), "1.3".to_owned(), "1.4".to_owned()],
-            unstable_features: [("org.matrix.msc3916.stable".to_owned(), true)].into(),
-        };
-        let ttl_value = TtlStoreValue { data: server_info.clone(), last_fetch_ts: 1000.0 };
-        let json = json!({
-            "versions": ["1.2", "1.3", "1.4"],
-            "unstable_features": {
-                "org.matrix.msc3916.stable": true,
-            },
-            "last_fetch_ts": 1000.0,
-        });
+        statestore_integration_tests!();
 
-        assert_eq!(serde_json::to_value(&ttl_value).unwrap(), json);
+        #[async_test]
+        async fn test_state_store_only_accepts_guard_for_underlying_mutex() {
+            let state_store = SaveLockedStateStore::new(MemoryStore::new());
+            let state_changes = StateChanges::default();
+            state_store
+                .save_changes_with_guard(&state_store.lock().lock().await, &state_changes)
+                .await
+                .expect("state store accepts guard for underlying mutex");
 
-        let deserialized =
-            serde_json::from_value::<TtlStoreValue<SupportedVersionsResponse>>(json).unwrap();
-        assert_eq!(deserialized.data, server_info);
-        assert!(deserialized.last_fetch_ts - ttl_value.last_fetch_ts < 0.0001);
+            let mutex = Mutex::new(());
+            state_store
+                .save_changes_with_guard(&mutex.lock().await, &state_changes)
+                .await
+                .expect_err("state store does not accept guard for unknown mutex");
+        }
+
+        #[derive(Debug)]
+        struct Elapsed;
+
+        async fn timeout<F: Future + Unpin>(
+            duration: Duration,
+            f: F,
+        ) -> Result<F::Output, Elapsed> {
+            #[cfg(all(target_family = "wasm", target_os = "unknown"))]
+            {
+                match future::select(sleep(duration), f).await {
+                    Either::Left(_) => return Err(Elapsed),
+                    Either::Right((output, _)) => Ok(output),
+                }
+            }
+            #[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
+            {
+                tokio::time::timeout(duration, f).await.map_err(|_| Elapsed)
+            }
+        }
+
+        #[async_test]
+        async fn test_state_store_waits_to_acquire_lock_before_saving_changes() {
+            let state_store = SaveLockedStateStore::new(MemoryStore::new().into_state_store());
+
+            // Acquire lock and hold it for 5 seconds
+            let lock_task = spawn({
+                let state_store = state_store.clone();
+                async move {
+                    let lock = state_store.lock();
+                    let _guard = lock.lock().await;
+                    sleep(Duration::from_secs(5)).await;
+                }
+            });
+
+            // Try to save changes to the state store while the lock is held by another task
+            let save_task =
+                spawn(async move { state_store.save_changes(&StateChanges::default()).await });
+
+            // Ensure that the second task does not progress until the first task has
+            // completed and therefore release the save lock
+            assert_matches!(future::select(lock_task, save_task).await, Either::Left((_, save_task)) => {
+                timeout(Duration::from_millis(100), save_task)
+                    .await
+                    .expect("task completes before timeout")
+                    .expect("task completes successfully")
+                    .expect("task saves changes");
+            });
+        }
     }
 }

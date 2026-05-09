@@ -6,8 +6,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased] - ReleaseDate
 
+## [0.17.0] - 2026-05-08
+
 ### Bug Fixes
 
+- Filter out service members from `Room::heroes`. This *should* be done by the homeservers, but some don't. 
+  ([#6535](https://github.com/matrix-org/matrix-rust-sdk/pull/6535))
 - Room keys are now rotated whenever the client fully reloads the member list by making a
   request to `/members`, which prevents clients using keys that may have been shared under
   [MSC4268](https://github.com/matrix-org/matrix-spec-proposals/pull/4268) even if a gappy
@@ -31,6 +35,24 @@ All notable changes to this project will be documented in this file.
 
 ### Features
 
+- [**breaking**] Add `RoomSummary::active_service_members` field to act as a cached value that will be computed 
+  when we sync members. Rename `Room::is_dm` to `Room::compute_is_dm` since it will now also store the computed 
+  active service members count in the new cached field. `Room::active_service_members` is now 
+  `Room::update_active_service_members` for the same reason.
+  ([#6537](https://github.com/matrix-org/matrix-rust-sdk/pull/6537))
+- [**breaking**] Enforce atomic and synchronized updates to `RoomInfo`. Requires 
+  `StateStore::save_changes` to acquire state store lock and replaces `Room::set_room_info` 
+  with an atomic version, `Room::update_room_info`, which is also synchronized by
+  the state store lock.
+  ([#6478](https://github.com/matrix-org/matrix-rust-sdk/pull/6478))
+- Add `RoomMember::is_service_member` that automatically checks the room info and retrieves this info. 
+  ([#6536](https://github.com/matrix-org/matrix-rust-sdk/pull/6536))
+- [**breaking**] Add `DmRoomDefinition` enum, allowing clients to specify what a DM 
+  room should look like. A `Room::is_dm` method was added to check if a room is a DM room too, 
+  using this definition. ([#6490](https://github.com/matrix-org/matrix-rust-sdk/pull/6490))
+- Add `Room::active_room_members`, returning a list of all the service room members 
+  that are active in the room. 
+  ([#6843](https://github.com/matrix-org/matrix-rust-sdk/pull/6483))
 - Add support in the `MemoryStore`'s implementation of `EventCacheStore` for 
   having duplicate events in a room, where each duplicate is in a different 
   `LinkedChunk`. This is useful, e.g., when an event is in a room and a 
@@ -52,6 +74,9 @@ All notable changes to this project will be documented in this file.
 
 ### Refactor
 
+- [**breaking**] `TtlStoreValue` was moved and renamed to `matrix_sdk_common::ttl::TtlValue`.
+  ([#6463](https://github.com/matrix-org/matrix-rust-sdk/pull/6463),
+  [#6484](https://github.com/matrix-org/matrix-rust-sdk/pull/6484))
 - [**breaking**] `Gap::prev_token` has been renamed to `Gap::token` since it's now used for both
   the previous batch token and the next batch token.
   ([#6236](https://github.com/matrix-org/matrix-rust-sdk/pull/6236))

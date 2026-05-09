@@ -23,7 +23,7 @@ use std::{
 use eyeball::SharedObservable;
 use eyeball_im::VectorDiff;
 use matrix_sdk_base::{
-    RoomInfoNotableUpdateReasons, StateChanges, apply_redaction,
+    RoomInfoNotableUpdateReasons, apply_redaction, check_validity_of_replacement_events,
     deserialized_responses::{ThreadSummary, ThreadSummaryStatus},
     event_cache::{
         Event, Gap,
@@ -1058,27 +1058,15 @@ impl<'a> RoomEventCacheStateLockWriteGuard<'a> {
             // The read receipt has changed! Do a little dance to update the `RoomInfo` in
             // the state store, and then in the room itself, so that observers
             // can be notified of the change.
-            let client = room.client();
-
-            // Take the state store lock.
-            let _state_store_lock = client.base_client().state_store_lock().lock().await;
-
-            // Don't reuse the room info from above, as it might have changed in the
-            // meanwhile. This access is somewhat protected by the state store locking, even
-            // though other code may call `set_room_info` concurrently.
-            let mut room_info = room.clone_info();
-            room_info.set_read_receipts(read_receipts);
-
-            let mut state_changes = StateChanges::default();
-            state_changes.add_room(room_info.clone());
-
-            // Update the `RoomInfo` in the state store.
-            if let Err(error) = client.state_store().save_changes(&state_changes).await {
+            let result = room
+                .update_and_save_room_info(|mut room_info| {
+                    room_info.set_read_receipts(read_receipts);
+                    (room_info, RoomInfoNotableUpdateReasons::READ_RECEIPT)
+                })
+                .await;
+            if let Err(error) = result {
                 error!(room_id = ?room.room_id(), ?error, "Failed to save the changes");
             }
-
-            // Update the `RoomInfo` of the room.
-            room.set_room_info(room_info, RoomInfoNotableUpdateReasons::READ_RECEIPT);
         }
 
         Ok(())
@@ -1122,12 +1110,28 @@ impl<'a> RoomEventCacheStateLockWriteGuard<'a> {
             // If there's an edit to the latest event in the thread, use the latest edit
             // event id as the latest event id for the thread summary.
             if let Some(event_id) = latest_event_id.as_ref()
-                && let Some((_, edits)) = self
+                && let Some((original_event, edits)) = self
                     .find_event_with_relations(event_id, Some(vec![RelationType::Replacement]))
                     .await?
-                && let Some(latest_edit) = edits.last()
             {
-                latest_event_id = latest_edit.event_id();
+                let latest_valid_edit = edits.into_iter().rfind(|edit| {
+                    let original_json = original_event.raw();
+                    let original_encryption_info = original_event.encryption_info();
+                    let replacement_json = edit.raw();
+                    let replacement_encryption_info = edit.encryption_info();
+
+                    check_validity_of_replacement_events(
+                        original_json,
+                        original_encryption_info.map(|v| &**v),
+                        replacement_json,
+                        replacement_encryption_info.map(|v| &**v),
+                    )
+                    .is_ok()
+                });
+
+                if let Some(latest_valid_edit) = latest_valid_edit {
+                    latest_event_id = latest_valid_edit.event_id();
+                }
             }
 
             self.maybe_update_thread_summary(thread_root, latest_event_id, post_processing_origin)
