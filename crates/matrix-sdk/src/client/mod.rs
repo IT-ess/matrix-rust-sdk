@@ -3404,6 +3404,55 @@ impl Client {
         self.inner.thread_subscription_catchup.get().unwrap()
     }
 
+    /// Pause the client for background suspension.
+    ///
+    /// This method:
+    /// 1. Disables all send queues (prevents new message sends).
+    /// 2. Pauses all database stores, waiting for in-flight operations and
+    ///    releasing all connections and file locks.
+    ///
+    /// Call [`Client::resume()`] when the app returns to the foreground.
+    ///
+    /// # iOS
+    ///
+    /// Call this before the app is suspended to avoid `0xdead10cc` kills.
+    /// Typically called from
+    /// [`applicationDidEnterBackground`](https://developer.apple.com/documentation/uikit/uiapplicationdelegate/applicationdidenterbackground(_:))
+    /// or an equivalent SwiftUI lifecycle event, *after* stopping the
+    /// `matrix_sdk_ui::sync_service::SyncService`.
+    pub async fn pause(&self) -> Result<()> {
+        info!("Client::pause — releasing database resources");
+
+        // Disable send queues so no new sends hit the stores.
+        self.send_queue().set_enabled(false).await;
+
+        // Close all stores (waits for in-flight ops, closes connections).
+        self.base_client().close_stores().await?;
+
+        info!("Client::pause — complete, all database connections released");
+        Ok(())
+    }
+
+    /// Resume the client after a [`Client::pause()`].
+    ///
+    /// Re-acquires store resources and re-enables send queues.
+    ///
+    /// If your app stopped the `matrix_sdk_ui::sync_service::SyncService`
+    /// before pausing, restart it separately as appropriate for your app
+    /// lifecycle.
+    pub async fn resume(&self) -> Result<()> {
+        info!("Client::resume — re-acquiring database resources");
+
+        // Reopen stores (creates new connection pools).
+        self.base_client().reopen_stores().await?;
+
+        // Re-enable send queues.
+        self.send_queue().set_enabled(true).await;
+
+        info!("Client::resume — complete");
+        Ok(())
+    }
+
     /// Perform database optimizations if any are available, i.e. vacuuming in
     /// SQLite.
     ///

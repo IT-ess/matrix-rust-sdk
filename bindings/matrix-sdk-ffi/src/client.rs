@@ -466,6 +466,37 @@ impl Client {
         Ok(self.inner.optimize_stores().await?)
     }
 
+    /// Pause the client for background suspension.
+    ///
+    /// This method:
+    /// 1. Disables all send queues (prevents new message sends).
+    /// 2. Pauses all database stores, waiting for in-flight operations and
+    ///    releasing all connections and file locks.
+    ///
+    /// Call [`Client::resume()`] when the app returns to the foreground.
+    ///
+    /// # iOS
+    ///
+    /// Call this before the app is suspended to avoid `0xdead10cc` kills.
+    /// Typically called from
+    /// [`applicationDidEnterBackground`](https://developer.apple.com/documentation/uikit/uiapplicationdelegate/applicationdidenterbackground(_:))
+    /// or an equivalent SwiftUI lifecycle event, *after* stopping the
+    /// `matrix_sdk_ui::sync_service::SyncService`.
+    pub async fn pause(&self) -> Result<(), ClientError> {
+        Ok(self.inner.pause().await?)
+    }
+
+    /// Resume the client after a [`Client::pause()`].
+    ///
+    /// Re-acquires store resources and re-enables send queues.
+    ///
+    /// If your app stopped the `matrix_sdk_ui::sync_service::SyncService`
+    /// before pausing, restart it separately as appropriate for your app
+    /// lifecycle.
+    pub async fn resume(&self) -> Result<(), ClientError> {
+        Ok(self.inner.resume().await?)
+    }
+
     /// Returns the sizes of the existing stores, if known.
     pub async fn get_store_sizes(&self) -> Result<StoreSizes, ClientError> {
         Ok(self.inner.get_store_sizes().await?.into())
@@ -1437,6 +1468,7 @@ impl Client {
     }
 
     /// Registers a pusher with given parameters
+    #[allow(clippy::too_many_arguments)]
     pub async fn set_pusher(
         &self,
         identifiers: PusherIdentifiers,
@@ -1445,6 +1477,7 @@ impl Client {
         device_display_name: String,
         profile_tag: Option<String>,
         lang: String,
+        append: bool,
     ) -> Result<(), ClientError> {
         let ids = identifiers.into();
 
@@ -1456,7 +1489,7 @@ impl Client {
             profile_tag,
             lang,
         };
-        self.inner.pusher().set(pusher_init.into()).await?;
+        self.inner.pusher().set(pusher_init.into(), append).await?;
         Ok(())
     }
 
@@ -3335,5 +3368,52 @@ mod tests {
         assert_eq!(token.token_type, "Bearer");
         assert_eq!(token.matrix_server_name, "example.com");
         assert_eq!(token.expires_in_seconds, 3_600);
+    }
+
+    /// Dropping an FFI [`Client`] on a non-tokio thread must not panic.
+    ///
+    /// Regression test: `Client.inner` is wrapped in [`AsyncRuntimeDropped`]
+    /// precisely because dropping a sqlite-backed [`MatrixClient`] outside a
+    /// tokio runtime context causes `SyncWrapper<rusqlite::Connection>::drop`
+    /// to call `tokio::task::spawn_blocking`, which panics and triggers
+    /// SIGABRT. This test guards against accidentally removing that wrapper.
+    #[cfg(not(target_family = "wasm"))]
+    #[tokio::test]
+    async fn client_drop_on_non_tokio_thread_does_not_panic() {
+        use std::time::Duration;
+
+        use matrix_sdk::{Client, config::RequestConfig};
+        use matrix_sdk_common::cross_process_lock::CrossProcessLockConfig;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+
+        // SingleProcess lock avoids the session-delegate requirement in
+        // `Client::new`, keeping the test self-contained.
+        let sdk_client = Client::builder()
+            .homeserver_url("https://example.com")
+            .request_config(RequestConfig::new().disable_retry())
+            .sqlite_store(dir.path(), None)
+            .cross_process_store_config(CrossProcessLockConfig::SingleProcess)
+            .build()
+            .await
+            .unwrap();
+
+        // Allow background init tasks to complete; after this the only strong
+        // reference to `ClientInner` is the local `sdk_client` variable.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        let ffi_client = super::Client::new(sdk_client.clone(), None, None).await.unwrap();
+
+        // Dropping `sdk_client` leaves `ffi_client` as the sole Arc holder of
+        // `ClientInner` — mirroring what happens when the last JS reference to
+        // a Client is garbage-collected on the Hermes JS thread.
+        drop(sdk_client);
+
+        // Simulate Hermes GC on the JS thread (a non-tokio thread).
+        // Without `AsyncRuntimeDropped` wrapping `Client.inner` this SIGABRT.
+        std::thread::spawn(move || drop(ffi_client))
+            .join()
+            .expect("Client::drop panicked on a non-tokio thread");
     }
 }

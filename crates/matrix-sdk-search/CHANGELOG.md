@@ -2,11 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
-<!-- next-header -->
-
-## [Unreleased] - ReleaseDate
+<!-- changelog start -->
 
 ## [0.17.0] - 2026-05-08
+
+No notable changes in this release.
+
+## [0.16.1] - 2026-05-08
 
 No notable changes in this release.
 

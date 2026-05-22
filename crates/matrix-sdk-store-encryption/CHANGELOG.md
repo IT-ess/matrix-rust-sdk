@@ -2,9 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-<!-- next-header -->
-
-## [Unreleased] - ReleaseDate
+<!-- changelog start -->
 
 ## [0.17.0] - 2026-05-08
 
@@ -13,6 +11,10 @@ All notable changes to this project will be documented in this file.
 - **breaking** The `Random` error variant has been removed. An infallible random
   number generator is used in the crate.
   ([#5502](https://github.com/matrix-org/matrix-rust-sdk/pull/5502))
+
+## [0.16.1] - 2026-05-08
+
+No notable changes in this release.
 
 ## [0.16.0] - 2025-12-04
 
@@ -36,7 +38,7 @@ No notable changes in this release.
 
 ## [0.10.0] - 2025-02-04
 
-### Bug Fixes
+### Bug fixes
 
 - Remove the usage of an unwrap in the `StoreCipher::import_with_key` method.
   This could have lead to panics if the second argument was an invalid
