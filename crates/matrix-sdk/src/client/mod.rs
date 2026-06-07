@@ -1847,6 +1847,46 @@ impl Client {
         self.create_room(request).await
     }
 
+    /// Create a bookmarks room according to [MSC4482].
+    ///
+    /// This method shouldn't be exposed to the user directly, but rather
+    /// used if no other bookmarks room already exists when trying to save
+    /// a bookmark.
+    ///
+    /// If the `e2e-encryption` feature is enabled, the room will also be
+    /// encrypted.
+    /// [MSC4482]: https://github.com/matrix-org/matrix-spec-proposals/pull/4482
+    #[cfg(feature = "experimental-bookmarks")]
+    pub async fn create_bookmarks_room(&self) -> Result<Room> {
+        use ruma::{
+            api::client::room::create_room::v3::CreationContent, room::RoomType, serde::Raw,
+        };
+
+        #[cfg(feature = "e2e-encryption")]
+        let initial_state = vec![
+            InitialStateEvent::with_empty_state_key(
+                RoomEncryptionEventContent::with_recommended_defaults(),
+            )
+            .to_raw_any(),
+        ];
+
+        let mut creation_content = CreationContent::new();
+        creation_content.room_type = Some(RoomType::Bookmarks);
+
+        #[cfg(not(feature = "e2e-encryption"))]
+        let initial_state = vec![];
+
+        let request = assign!(create_room::v3::Request::new(), {
+            invite: vec![],
+            creation_content: Some(Raw::new(&creation_content)?),
+            is_direct: true,
+            preset: Some(create_room::v3::RoomPreset::PrivateChat),
+            initial_state,
+        });
+
+        self.create_room(request).await
+    }
+
     /// Get the first existing DM room with the given user, if any.
     pub fn get_dm_room(&self, user_id: &UserId) -> Option<Room> {
         self.get_dm_rooms(user_id).next()
