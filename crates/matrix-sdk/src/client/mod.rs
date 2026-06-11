@@ -85,6 +85,8 @@ use self::{
     caches::{Cache, CachedValue, ClientCaches},
     futures::SendRequest,
 };
+#[cfg(feature = "experimental-bookmarks")]
+use crate::bookmark_index::BookmarkIndexStore;
 use crate::{
     Account, AuthApi, AuthSession, Error, HttpError, Media, Pusher, RefreshTokenError, Result,
     Room, SessionTokens, TransmissionProgress,
@@ -401,6 +403,10 @@ pub(crate) struct ClientInner {
     /// Handler for [`RoomIndex`]'s of each room
     search_index: SearchIndex,
 
+    #[cfg(feature = "experimental-bookmarks")]
+    /// Handler for the global [`BookmarkIndex`]
+    bookmark_index: BookmarkIndexStore,
+
     /// A monitor for background tasks spawned by the client.
     pub(crate) task_monitor: TaskMonitor,
 
@@ -437,6 +443,7 @@ impl ClientInner {
         #[cfg(feature = "e2e-encryption")] enable_share_history_on_invite: bool,
         cross_process_lock_config: CrossProcessLockConfig,
         #[cfg(feature = "experimental-search")] search_index_handler: SearchIndex,
+        #[cfg(feature = "experimental-bookmarks")] bookmark_index_handler: BookmarkIndexStore,
         thread_subscription_catchup: OnceCell<Arc<ThreadSubscriptionCatchup>>,
         media_fetcher: Arc<dyn MediaFetcher>,
     ) -> Arc<Self> {
@@ -478,6 +485,8 @@ impl ClientInner {
             server_max_upload_size: Mutex::new(OnceCell::new()),
             #[cfg(feature = "experimental-search")]
             search_index: search_index_handler,
+            #[cfg(feature = "experimental-search")]
+            bookmark_index: bookmark_index_handler,
             thread_subscription_catchup,
             task_monitor: TaskMonitor::new(),
             #[cfg(feature = "e2e-encryption")]
@@ -3299,6 +3308,8 @@ impl Client {
                 cross_process_lock_config,
                 #[cfg(feature = "experimental-search")]
                 self.inner.search_index.clone(),
+                #[cfg(feature = "experimental-bookmarks")]
+                self.inner.bookmark_index.clone(),
                 self.inner.thread_subscription_catchup.clone(),
                 self.inner.media_fetcher.clone(),
             )
@@ -3413,6 +3424,12 @@ impl Client {
     #[cfg(feature = "experimental-search")]
     pub fn search_index(&self) -> &SearchIndex {
         &self.inner.search_index
+    }
+
+    /// Returns the [`BookmarkIndexStore`] for this [`Client`].
+    #[cfg(feature = "experimental-bookmarks")]
+    pub fn bookmark_index(&self) -> &BookmarkIndexStore {
+        &self.inner.bookmark_index
     }
 
     /// Whether the client is configured to take thread subscriptions (MSC4306

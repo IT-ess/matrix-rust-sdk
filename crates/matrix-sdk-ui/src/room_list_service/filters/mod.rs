@@ -63,6 +63,8 @@ use super::RoomListItem;
 
 mod all;
 mod any;
+#[cfg(feature = "experimental-bookmarks")]
+mod bookmarks;
 mod category;
 mod deduplicate_versions;
 mod favourite;
@@ -81,6 +83,7 @@ mod unread;
 pub use self::{
     all::new_filter as new_filter_all,
     any::new_filter as new_filter_any,
+    bookmarks::new_filter as new_filter_bookmarks,
     category::{RoomCategory, new_filter as new_filter_category},
     deduplicate_versions::new_filter as new_filter_deduplicate_versions,
     favourite::new_filter as new_filter_favourite,

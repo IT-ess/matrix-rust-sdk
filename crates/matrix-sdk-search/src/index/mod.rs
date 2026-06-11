@@ -266,11 +266,12 @@ impl RoomIndex {
                     | OpenDirectoryError::NotADirectory(_) => return Err(err),
                 },
                 // Bubble
-                IndexError::QueryParserError(_) => return Err(err),
+                IndexError::QueryParserError(_) | IndexError::IdParsing => return Err(err),
                 // Ignore
                 IndexError::CannotIndexRedactedMessage
                 | IndexError::EmptyMessage
-                | IndexError::MessageTypeNotSupported => break,
+                | IndexError::MessageTypeNotSupported
+                | IndexError::BookmarkIndexError(_) => break,
             }
             debug!("Failed to execute operation in room index (try {num_tries}): {err}");
         }

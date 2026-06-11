@@ -210,6 +210,15 @@ pub struct EventCacheDropHandles {
     #[cfg(feature = "experimental-search")]
     _search_indexing_task: BackgroundTaskHandle,
 
+    /// MSC4482: A background task listening to room updates, and
+    /// automatically handling bookmark index operations add/remove/edit
+    /// depending on the event type.
+    ///
+    /// One important constraint is that there is only one such task per
+    /// [`EventCache`], so it does listen to *all* rooms at the same time.
+    #[cfg(feature = "experimental-bookmarks")]
+    _bookmark_indexing_task: BackgroundTaskHandle,
+
     /// The task used to automatically redecrypt UTDs.
     #[cfg(feature = "e2e-encryption")]
     _redecryptor: redecryptor::Redecryptor,
@@ -358,6 +367,18 @@ impl EventCache {
             )
             .abort_on_drop();
 
+        #[cfg(feature = "experimental-bookmarks")]
+        let bookmark_indexing_task = client
+            .task_monitor()
+            .spawn_infinite_task(
+                "event_cache::bookmark_indexing",
+                tasks::bookmark_indexing_task(
+                    self.inner.client.clone(),
+                    self.inner.linked_chunk_update_sender.clone(),
+                ),
+            )
+            .abort_on_drop();
+
             if self.config().experimental_auto_backpagination {
                 // Run the deferred initialization of the automatic pagination request sender, that
                 // is shared with every room.
@@ -376,6 +397,8 @@ impl EventCache {
                 _thread_subscriber_task: thread_subscriber_task,
                 #[cfg(feature = "experimental-search")]
                 _search_indexing_task: search_indexing_task,
+                #[cfg(feature = "experimental-bookmarks")]
+                _bookmark_indexing_task: bookmark_indexing_task,
             })
         });
 

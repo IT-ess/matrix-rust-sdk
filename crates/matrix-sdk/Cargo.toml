@@ -91,7 +91,7 @@ experimental-search = ["matrix-sdk-search"]
 
 experimental-element-recent-emojis = ["matrix-sdk-base/experimental-element-recent-emojis"]
 
-experimental-bookmarks = ["ruma/unstable-msc4482"]
+experimental-bookmarks = ["ruma/unstable-msc4482", "matrix-sdk-base/experimental-bookmarks"]
 
 [dependencies]
 anyhow = { workspace = true, optional = true }
