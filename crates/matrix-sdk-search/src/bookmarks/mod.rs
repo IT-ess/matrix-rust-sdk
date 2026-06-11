@@ -24,8 +24,11 @@ use ruma::{
     UserId, events::bookmark::OriginalSyncBookmarkEvent,
 };
 use tantivy::{
-    Index, IndexReader, TantivyDocument, collector::TopDocs, directory::error::OpenDirectoryError,
-    query::QueryParser, schema::Value,
+    Index, IndexReader, TantivyDocument, Term,
+    collector::TopDocs,
+    directory::error::OpenDirectoryError,
+    query::{BooleanQuery, Occur, QueryParser, TermQuery},
+    schema::{IndexRecordOption, Value},
 };
 use tracing::{debug, warn};
 
@@ -131,6 +134,8 @@ impl BookmarkIndex {
     /// Search the [`BookmarkIndex`] for some query. Returns a list of
     /// results with a maximum given length. If `pagination_offset` is
     /// set then the results will start there, i.e.
+    /// If a room_id is provided, only the bookmarks from this room will
+    /// be returned.
     ///
     /// if `max_number_of_results = 3` and `pagination_offset = 10`
     /// (and there are a surplus of results)
@@ -140,14 +145,25 @@ impl BookmarkIndex {
         query: &str,
         max_number_of_results: usize,
         pagination_offset: Option<usize>,
+        room_id_filter: Option<&RoomId>,
     ) -> Result<Vec<IndexedBookmark>, IndexError> {
-        let query = self.query_parser.parse_query(query)?;
+        let base_query = self.query_parser.parse_query(query)?;
+
+        let full_query = if let Some(room_id) = room_id_filter {
+            let room_term = Term::from_field_text(self.schema.room_id_key(), room_id.as_str());
+            let room_filter_query =
+                Box::new(TermQuery::new(room_term, IndexRecordOption::WithFreqs));
+            BooleanQuery::new(vec![(Occur::Must, base_query), (Occur::Must, room_filter_query)])
+        } else {
+            BooleanQuery::new(vec![(Occur::Must, base_query)])
+        };
+
         let searcher = self.get_reader()?.searcher();
 
         let offset = pagination_offset.unwrap_or(0);
 
         let results = searcher.search(
-            &query,
+            &full_query,
             &TopDocs::with_limit(max_number_of_results).and_offset(offset).order_by_score(),
         )?;
         let mut ret: Vec<IndexedBookmark> = Vec::new();
@@ -210,6 +226,7 @@ impl BookmarkIndex {
             format!("{}:\"{event_id}\"", self.schema.get_field_name(self.schema.deletion_key()))
                 .as_str(),
             10000,
+            None,
             None,
         )
     }
@@ -371,6 +388,7 @@ impl BookmarkIndex {
                 .as_str(),
             1,
             None,
+            None,
         );
         match search_result {
             Ok(results) => {
@@ -394,6 +412,7 @@ impl BookmarkIndex {
             )
             .as_str(),
             1,
+            None,
             None,
         );
         match search_result {

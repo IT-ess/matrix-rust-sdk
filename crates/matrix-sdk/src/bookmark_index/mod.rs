@@ -149,13 +149,13 @@ impl BookmarkIndexGuard<'_> {
         query: &str,
         max_number_of_results: usize,
         pagination_offset: Option<usize>,
-        room_id: Option<&RoomId>,
+        room_id_filter: Option<&RoomId>,
     ) -> Result<Vec<IndexedBookmark>, IndexError> {
         if let Some(index) = self.index.as_ref() {
-            index.search(query, max_number_of_results, pagination_offset)
+            index.search(query, max_number_of_results, pagination_offset, room_id_filter)
         } else {
             let index = self.create_index()?;
-            index.search(query, max_number_of_results, pagination_offset)
+            index.search(query, max_number_of_results, pagination_offset, room_id_filter)
         }
     }
 
