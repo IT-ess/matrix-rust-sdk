@@ -397,6 +397,11 @@ pub enum Error {
     /// We timed out attempting to complete an operation.
     #[error("timed out")]
     Timeout,
+
+    /// An error related to bookmarks.
+    #[cfg(feature = "experimental-bookmarks")]
+    #[error("An error happened related to bookmarks")]
+    BookmarksError,
 }
 
 #[rustfmt::skip] // stop rustfmt breaking the `<code>` in docs across multiple lines
