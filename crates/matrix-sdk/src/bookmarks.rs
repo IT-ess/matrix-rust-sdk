@@ -19,9 +19,9 @@
 use matrix_sdk_base::deserialized_responses::TimelineEvent;
 #[cfg(doc)]
 use matrix_sdk_search::bookmarks::BookmarkIndex;
-use matrix_sdk_search::{bookmarks::IndexedBookmark, error::IndexError};
+pub use matrix_sdk_search::{bookmarks::IndexedBookmark, error::IndexError};
 use ruma::{
-    EventId,
+    EventId, RoomId,
     api::client::{
         redact::redact_event,
         room::create_room::{self, v3::CreationContent},
@@ -51,17 +51,11 @@ impl Room {
         max_number_of_results: usize,
         pagination_offset: Option<usize>,
     ) -> Result<Vec<IndexedBookmark>, IndexError> {
-        let mut bookmark_index_guard = self.client.bookmark_index().lock().await;
-        bookmark_index_guard.search(
-            query,
-            max_number_of_results,
-            pagination_offset,
-            Some(self.room_id()),
-        )
+        self.client
+            .search_bookmarks(query, max_number_of_results, pagination_offset, Some(self.room_id()))
+            .await
     }
-}
 
-impl Room {
     /// Search for bookmarks in this room matching the given query, returning an
     /// iterator over the results.
     pub fn search_room_bookmarks_iterator(
@@ -176,9 +170,10 @@ impl Client {
         query: &str,
         max_number_of_results: usize,
         pagination_offset: Option<usize>,
+        room_id_filter: Option<&RoomId>,
     ) -> Result<Vec<IndexedBookmark>, IndexError> {
         let mut index = self.bookmark_index().lock().await;
-        index.search(query, max_number_of_results, pagination_offset, None)
+        index.search(query, max_number_of_results, pagination_offset, room_id_filter)
     }
 
     /// Retrieve the bookmarks room
@@ -214,5 +209,12 @@ async fn create_bookmarks_room(client: &Client) -> crate::Result<Room> {
     creation_content.room_type = Some(ruma::room::RoomType::Bookmarks);
     request.creation_content = Some(Raw::new(&creation_content).unwrap());
 
-    client.create_room(request).await
+    let room = client.create_room(request).await?;
+
+    #[cfg(feature = "e2e-encryption")]
+    {
+        room.enable_encryption().await?;
+    }
+
+    Ok(room)
 }
