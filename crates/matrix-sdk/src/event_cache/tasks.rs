@@ -581,17 +581,6 @@ pub(super) async fn bookmark_indexing_task(
 
                 let redaction_rules = room.clone_info().room_version_rules_or_default().redaction;
 
-                // if let Err(err) = bookmark_index_guard
-                //     .bulk_handle_timeline_event(
-                //         timeline_events,
-                //         &room_cache,
-                //         &room_id,
-                //         &redaction_rules,
-                //     )
-                //     .await
-                // {
-                //     error!("Failed to handle events for indexing: {err}")
-                // }
                 if let Some(room_type) = room.room_type() {
                     match room_type {
                         RoomType::Bookmarks => {

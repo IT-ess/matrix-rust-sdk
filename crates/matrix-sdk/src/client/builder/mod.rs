@@ -551,6 +551,13 @@ impl ClientBuilder {
         self
     }
 
+    /// The base directory in which each bookmarks index directory will be stored.
+    #[cfg(feature = "experimental-bookmarks")]
+    pub fn bookmark_index_store(mut self, kind: BookmarkIndexStoreKind) -> Self {
+        self.bookmark_index_store_kind = kind;
+        self
+    }
+
     /// Create a [`Client`] with the options set on this builder.
     ///
     /// # Errors

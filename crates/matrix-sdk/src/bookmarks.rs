@@ -40,7 +40,7 @@ impl Room {
         max_number_of_results: usize,
         pagination_offset: Option<usize>,
     ) -> Result<Vec<IndexedBookmark>, IndexError> {
-        self.search_room_bookmarks("", max_number_of_results, pagination_offset).await
+        self.search_room_bookmarks("*", max_number_of_results, pagination_offset).await
     }
 
     /// Search the [`BookmarkIndex`]  and return at most
