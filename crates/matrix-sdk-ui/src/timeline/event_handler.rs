@@ -336,6 +336,7 @@ impl TimelineAction {
                                 thread_root: None,
                                 in_reply_to: None,
                                 thread_summary: None,
+                                bookmarked: false,
                             }))
                         } else {
                             // A non-live beacon_info is a stop event: it should update the
@@ -434,6 +435,7 @@ impl TimelineAction {
                     thread_root,
                     in_reply_to,
                     thread_summary,
+                    bookmarked: false,
                 }))
             }
 
@@ -449,6 +451,7 @@ impl TimelineAction {
                         thread_root,
                         in_reply_to,
                         thread_summary,
+                        bookmarked: false,
                     }),
                 }
             }
@@ -486,6 +489,7 @@ impl TimelineAction {
                         thread_root,
                         in_reply_to,
                         thread_summary,
+                        bookmarked: false,
                     }),
                 }
             }
@@ -950,6 +954,25 @@ impl<'a, 'o> TimelineEventHandler<'a, 'o> {
         content: TimelineItemContent,
         recycled_timeline_id: Option<TimelineUniqueId>,
     ) {
+        // Flag message-like items that point to a currently-bookmarked event.
+        // This is an O(1) lookup against the cached set, so it stays cheap even
+        // when building many items.
+        let is_bookmarked = matches!(
+            &self.ctx.flow,
+            Flow::Remote { event_id, .. }
+                if self.meta.bookmarked_events.contains(&**event_id)
+        );
+        let content = if is_bookmarked {
+            match content {
+                TimelineItemContent::MsgLike(msglike) => {
+                    TimelineItemContent::MsgLike(msglike.with_bookmarked(true))
+                }
+                other => other,
+            }
+        } else {
+            content
+        };
+
         let sender = self.ctx.sender.to_owned();
         let sender_profile = TimelineDetails::from_initial_value(self.ctx.sender_profile.clone());
 

@@ -185,6 +185,7 @@ impl TimelineItemContent {
                 thread_root: None,
                 in_reply_to: None,
                 thread_summary: None,
+                bookmarked: false,
             })),
 
             Some(TimelineAction::HandleAggregation {
@@ -315,6 +316,7 @@ impl TimelineItemContent {
             thread_root,
             in_reply_to,
             thread_summary,
+            bookmarked: false,
         })
     }
 

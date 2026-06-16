@@ -1562,6 +1562,7 @@ impl TimelineController {
             thread_root,
             in_reply_to,
             thread_summary,
+            bookmarked,
         }) = item.content().clone()
         else {
             info!("Event is no longer a message (redacted?)");
@@ -1583,10 +1584,52 @@ impl TimelineController {
             thread_root,
             in_reply_to: Some(InReplyToDetails { event_id: in_reply_to.event_id, event }),
             thread_summary,
+            bookmarked,
         }));
         state.items.replace(index, TimelineItem::new(item, internal_id));
 
         Ok(())
+    }
+
+    /// Load the set of bookmarked events for this room into the metadata cache.
+    ///
+    /// This is used to efficiently flag message-like timeline items as
+    /// bookmarked, without querying the bookmark index per item.
+    pub(super) async fn load_bookmarked_events(&self) {
+        let bookmarked_events = self.room_data_provider.load_bookmarked_events().await;
+        self.state.write().await.meta.bookmarked_events = bookmarked_events;
+    }
+
+    /// Update the bookmarked state of an event.
+    ///
+    /// This updates the cached set (so future items get the right flag) and the
+    /// corresponding timeline item, if it's currently in the timeline.
+    pub(super) async fn set_event_bookmarked(&self, event_id: &EventId, bookmarked: bool) {
+        let mut state = self.state.write().await;
+
+        if bookmarked {
+            state.meta.bookmarked_events.insert(event_id.to_owned());
+        } else {
+            state.meta.bookmarked_events.remove(event_id);
+        }
+
+        // Update the existing item in place, if any.
+        let updated = {
+            let Some((index, item)) = rfind_event_by_id(&state.items, event_id) else {
+                return;
+            };
+            let TimelineItemContent::MsgLike(msglike) = item.content() else {
+                return;
+            };
+            if msglike.bookmarked == bookmarked {
+                return;
+            }
+            let new_content = TimelineItemContent::MsgLike(msglike.with_bookmarked(bookmarked));
+            let event_item = item.inner.with_content(new_content);
+            (index, TimelineItem::new(event_item, item.internal_id.clone()))
+        };
+
+        state.items.replace(updated.0, updated.1);
     }
 
     /// Returns the thread that should be used for a read receipt based on the

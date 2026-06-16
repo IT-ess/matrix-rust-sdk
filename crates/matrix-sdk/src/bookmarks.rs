@@ -76,6 +76,33 @@ impl Room {
         }
     }
 
+    /// Return the set of (root) event ids that are currently bookmarked in
+    /// this room.
+    ///
+    /// The returned event ids are the *original* (root of the `m.replace`
+    /// relation chain) event ids, i.e. the ones that match a timeline item's
+    /// own event id.
+    pub async fn bookmarked_event_ids(
+        &self,
+    ) -> Result<std::collections::HashSet<OwnedEventId>, IndexError> {
+        // Number of bookmarks to load per index query.
+        const BATCH_SIZE: usize = 100;
+
+        let mut event_ids = std::collections::HashSet::new();
+        let mut offset = 0;
+
+        loop {
+            let batch = self.get_room_bookmarks(BATCH_SIZE, Some(offset)).await?;
+            if batch.is_empty() {
+                break;
+            }
+            offset += batch.len();
+            event_ids.extend(batch.into_iter().map(|bookmark| bookmark.original_event_id));
+        }
+
+        Ok(event_ids)
+    }
+
     /// Bookmark an event of this room
     /// This method will not check the validity of the event_id
     pub async fn bookmark_event(

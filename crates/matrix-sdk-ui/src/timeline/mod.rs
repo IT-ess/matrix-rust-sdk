@@ -637,6 +637,86 @@ impl Timeline {
         Ok(())
     }
 
+    /// Check whether the event represented by the given timeline item is
+    /// currently bookmarked.
+    ///
+    /// Returns the [`EventId`] of the associated bookmark event (the event sent
+    /// in the bookmarks room) if the item is bookmarked, or `None` otherwise
+    /// (including when the item isn't found or is a local echo that has no
+    /// event id yet).
+    #[cfg(feature = "experimental-bookmarks")]
+    pub async fn is_event_bookmarked(
+        &self,
+        item_id: &TimelineEventItemId,
+    ) -> Option<OwnedEventId> {
+        let items = self.items().await;
+        let (_pos, item) = rfind_event_by_item_id(&items, item_id)?;
+        let event_id = item.event_id()?;
+        self.room().client().is_event_bookmarked(event_id).await
+    }
+
+    /// Bookmark the event represented by the given timeline item.
+    ///
+    /// Only remote events (i.e. events that have already been sent to the
+    /// server) can be bookmarked.
+    #[cfg(feature = "experimental-bookmarks")]
+    pub async fn bookmark_event(&self, item_id: &TimelineEventItemId) -> Result<(), Error> {
+        let items = self.items().await;
+        let Some((_pos, item)) = rfind_event_by_item_id(&items, item_id) else {
+            return Err(Error::EventNotInTimeline(item_id.clone()));
+        };
+
+        let Some(event_id) = item.event_id() else {
+            return Err(BookmarkError::LocalEcho.into());
+        };
+
+        let sender_display_name = match item.sender_profile() {
+            TimelineDetails::Ready(profile) => profile.display_name.clone(),
+            _ => None,
+        }
+        .unwrap_or_else(|| item.sender().to_string());
+
+        self.room()
+            .bookmark_event(event_id, &sender_display_name)
+            .await
+            .map_err(BookmarkError::SdkError)?;
+
+        // Reflect the change immediately in the timeline.
+        self.controller.set_event_bookmarked(event_id, true).await;
+
+        Ok(())
+    }
+
+    /// Remove the bookmark associated with the event represented by the given
+    /// timeline item.
+    ///
+    /// Only remote events (i.e. events that have already been sent to the
+    /// server) can be unbookmarked.
+    #[cfg(feature = "experimental-bookmarks")]
+    pub async fn unbookmark_event(&self, item_id: &TimelineEventItemId) -> Result<(), Error> {
+        let items = self.items().await;
+        let Some((_pos, item)) = rfind_event_by_item_id(&items, item_id) else {
+            return Err(Error::EventNotInTimeline(item_id.clone()));
+        };
+
+        let Some(event_id) = item.event_id() else {
+            return Err(BookmarkError::LocalEcho.into());
+        };
+
+        let client = self.room().client();
+
+        let Some(bookmark_event_id) = client.is_event_bookmarked(event_id).await else {
+            return Err(BookmarkError::NotBookmarked.into());
+        };
+
+        client.unbookmark_event(&bookmark_event_id).await.map_err(BookmarkError::SdkError)?;
+
+        // Reflect the change immediately in the timeline.
+        self.controller.set_event_bookmarked(event_id, false).await;
+
+        Ok(())
+    }
+
     /// Fetch unavailable details about the event with the given ID.
     ///
     /// This method only works for IDs of remote [`EventTimelineItem`]s,

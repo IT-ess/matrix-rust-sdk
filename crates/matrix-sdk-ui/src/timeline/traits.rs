@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::future::Future;
+use std::{collections::HashSet, future::Future};
 
 use eyeball::Subscriber;
 use indexmap::IndexMap;
@@ -149,6 +149,18 @@ pub(super) trait RoomDataProvider:
         &'a self,
         event_id: &'a EventId,
     ) -> impl Future<Output = Result<TimelineEvent>> + SendOutsideWasm + 'a;
+
+    /// Load the set of (root) event ids that are currently bookmarked in this
+    /// room.
+    ///
+    /// This is used to efficiently flag bookmarked timeline items: the set is
+    /// loaded once and then consulted with O(1) lookups while building items.
+    /// Defaults to an empty set.
+    fn load_bookmarked_events(
+        &self,
+    ) -> impl Future<Output = HashSet<OwnedEventId>> + SendOutsideWasm + '_ {
+        async { HashSet::new() }
+    }
 }
 
 impl RoomDataProvider for Room {
@@ -248,5 +260,16 @@ impl RoomDataProvider for Room {
 
     async fn load_event<'a>(&'a self, event_id: &'a EventId) -> Result<TimelineEvent> {
         self.load_or_fetch_event(event_id, None).await
+    }
+
+    #[cfg(feature = "experimental-bookmarks")]
+    async fn load_bookmarked_events(&self) -> HashSet<OwnedEventId> {
+        match self.bookmarked_event_ids().await {
+            Ok(event_ids) => event_ids,
+            Err(err) => {
+                error!("Failed to load bookmarked events: {err}");
+                HashSet::new()
+            }
+        }
     }
 }
