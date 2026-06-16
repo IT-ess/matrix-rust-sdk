@@ -38,6 +38,7 @@ use super::{
 };
 use crate::{
     client::WeakClient,
+    event_cache::AutomaticPagination,
     send_queue::{LocalEchoContent, RoomSendQueueUpdate, SendQueueUpdate},
 };
 
@@ -619,5 +620,25 @@ pub(super) async fn bookmark_indexing_task(
                 warn!(num_skipped, "Lagged behind linked chunk updates");
             }
         }
+    }
+}
+
+/// Retrieves the active bookmarks room id and trigger an
+/// automatic back-pagination request if it exists.
+///
+/// This is a one-shot task that should be triggered on each
+/// client launch.
+#[cfg(feature = "experimental-bookmarks")]
+pub(super) async fn bookmarks_room_crawl_task(
+    client: WeakClient,
+    auto_pagination_handle: AutomaticPagination,
+) {
+    let Some(client) = client.get() else {
+        trace!("Client is shutting down, exiting bookmarks crawl task");
+        return;
+    };
+
+    if let Ok(Some(bookmarks_room_id)) = client.account().get_bookmarks_room_id().await {
+        auto_pagination_handle.run_once(&bookmarks_room_id);
     }
 }

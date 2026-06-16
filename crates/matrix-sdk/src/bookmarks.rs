@@ -26,9 +26,13 @@ use ruma::{
         redact::redact_event,
         room::create_room::{self, v3::CreationContent},
     },
-    events::bookmark::{BookmarkEventContent, PointerContentBlock},
+    events::{
+        bookmark::{BookmarkEventContent, PointerContentBlock},
+        bookmarks_room::BookmarksRoomEventContent,
+    },
     serde::Raw,
 };
+use tracing::error;
 
 use crate::{Client, Room, message_search::SearchError, room::futures::SendMessageLikeEventResult};
 
@@ -177,11 +181,12 @@ impl Client {
     }
 
     /// Retrieve the bookmarks room
-    pub fn get_bookmarks_room(&self) -> Option<Room> {
-        let all_rooms = self.rooms();
-        // TODO: manage the case where multiple bookmark rooms
-        // exist (compare room versions ?)
-        all_rooms.into_iter().find(|r| r.is_bookmarks())
+    pub async fn get_bookmarks_room(&self) -> crate::Result<Option<Room>> {
+        if let Some(bookmarks_room_id) = self.account().get_bookmarks_room_id().await? {
+            Ok(self.get_room(&bookmarks_room_id))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Do an operation with the bookmarks room
@@ -189,12 +194,20 @@ impl Client {
     where
         F: FnOnce(Room) -> R,
     {
-        if let Some(room) = self.get_bookmarks_room() {
-            Some(f(room))
-        } else if create_if_needed && let Some(room) = create_bookmarks_room(self).await.ok() {
-            Some(f(room))
-        } else {
-            None
+        match self.get_bookmarks_room().await {
+            Ok(Some(room)) => Some(f(room)),
+            Ok(None) if create_if_needed => match create_bookmarks_room(self).await {
+                Ok(room) => Some(f(room)),
+                Err(e) => {
+                    error!("Error while trying to create bookmarks room {e}");
+                    None
+                }
+            },
+            Err(e) => {
+                error!("Error while trying to get bookmarks room {e}");
+                None
+            }
+            _ => None,
         }
     }
 }
@@ -210,6 +223,11 @@ async fn create_bookmarks_room(client: &Client) -> crate::Result<Room> {
     request.creation_content = Some(Raw::new(&creation_content).unwrap());
 
     let room = client.create_room(request).await?;
+
+    client
+        .account()
+        .set_account_data(BookmarksRoomEventContent::new(room.room_id().to_owned()))
+        .await?;
 
     #[cfg(feature = "e2e-encryption")]
     {

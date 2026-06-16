@@ -379,11 +379,25 @@ impl EventCache {
             )
             .abort_on_drop();
 
-            if self.config().experimental_auto_backpagination {
+            // The experimental-bookmarks feature needs auto_backpagination for all rooms that
+            // have type [`RoomType::Bookmarks`].
+            let needs_automatic_pagination = self.config().experimental_auto_backpagination
+                || cfg!(feature = "experimental-bookmarks");
+
+            if needs_automatic_pagination {
                 // Run the deferred initialization of the automatic pagination request sender, that
                 // is shared with every room.
                 trace!("spawning the automatic paginations API");
-                self.inner.automatic_pagination.get_or_init(|| AutomaticPagination::new(Arc::downgrade(&self.inner), task_monitor));
+                let _auto_pagination_handle = self.inner.automatic_pagination.get_or_init(|| AutomaticPagination::new(Arc::downgrade(&self.inner), task_monitor));
+
+                if cfg!(feature = "experimental-bookmarks") {
+                    client.task_monitor().spawn_finite_task(
+                        "event_cache::bookmarks_room_crawl",
+                        tasks::bookmarks_room_crawl_task(
+                            self.inner.client.clone(),
+                            _auto_pagination_handle.clone())
+                    );
+                }
             } else {
                 trace!("automatic paginations API is disabled");
             }
@@ -718,6 +732,30 @@ impl EventCacheInner {
         // TODO: we don't anything with `updates.invite` at this point.
 
         Ok(())
+    }
+
+    /// Returns the [`AutomaticPagination`] to use for a given room, if any.
+    ///
+    /// Automatic back-pagination is enabled for a room when it is globally
+    /// enabled through [`EventCacheConfig::experimental_auto_backpagination`],
+    /// or when the room is a bookmarks room (as defined by [MSC4482]), since
+    /// this room needs to be backpaginated so we get an exhaustive list of
+    /// all bookmarked events.
+    ///
+    /// [MSC4482]: https://github.com/matrix-org/matrix-spec-proposals/pull/4482
+    #[cfg_attr(not(feature = "experimental-bookmarks"), allow(unused_variables))]
+    fn automatic_pagination_for_room(&self, room_id: &RoomId) -> Option<AutomaticPagination> {
+        let enabled = self.config.read().unwrap().experimental_auto_backpagination;
+
+        #[cfg(feature = "experimental-bookmarks")]
+        let enabled = enabled
+            || self
+                .client
+                .get()
+                .and_then(|client| client.get_room(room_id))
+                .is_some_and(|room| room.is_bookmarks());
+
+        enabled.then(|| self.automatic_pagination.get().cloned()).flatten()
     }
 
     /// Return all the event caches associated to a specific room.

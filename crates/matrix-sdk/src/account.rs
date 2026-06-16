@@ -1424,6 +1424,20 @@ impl Account {
             Ok(Vec::new())
         }
     }
+
+    /// Get the active bookmarks room from the `it.refs.msc4482.bookmarks_room`
+    /// global account data.
+    #[cfg(feature = "experimental-bookmarks")]
+    pub async fn get_bookmarks_room_id(&self) -> Result<Option<OwnedRoomId>> {
+        use ruma::events::bookmarks_room::BookmarksRoomEventContent;
+        Ok(self
+            .client
+            .state_store()
+            .get_account_data_event_static::<BookmarksRoomEventContent>()
+            .await?
+            .map(|raw| raw.deserialize().map(|event| event.content.active_bookmarks_room_id))
+            .transpose()?)
+    }
 }
 
 fn get_raw_content<Ev, C>(raw: Option<Raw<Ev>>) -> Result<Option<Raw<C>>> {
