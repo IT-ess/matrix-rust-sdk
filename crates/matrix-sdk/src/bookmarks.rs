@@ -21,7 +21,7 @@ use matrix_sdk_base::deserialized_responses::TimelineEvent;
 use matrix_sdk_search::bookmarks::BookmarkIndex;
 pub use matrix_sdk_search::{bookmarks::IndexedBookmark, error::IndexError};
 use ruma::{
-    EventId, RoomId,
+    EventId, OwnedEventId, RoomId,
     api::client::{
         redact::redact_event,
         room::create_room::{self, v3::CreationContent},
@@ -92,21 +92,6 @@ impl Room {
         let send_closure = move |r: Room| async move { r.send(payload).await };
         let maybe_result = self.client().with_bookmarks_room(send_closure, true).await;
         maybe_result.ok_or(crate::Error::BookmarksError)?.await
-    }
-
-    /// Remove an event from the list of bookmarks
-    pub async fn unbookmark_event(
-        &self,
-        bookmark_event_id: &EventId,
-    ) -> crate::Result<redact_event::v3::Response> {
-        let redact_closure = move |r: Room| async move {
-            r.redact(bookmark_event_id, Some("Bookmark removal"), None).await
-        };
-        let maybe_result = self.client().with_bookmarks_room(redact_closure, true).await;
-        maybe_result
-            .ok_or(crate::Error::BookmarksError)?
-            .await
-            .map_err(|e| crate::Error::Http(Box::new(e)))
     }
 }
 
@@ -209,6 +194,30 @@ impl Client {
             }
             _ => None,
         }
+    }
+
+    /// Remove an event from the list of bookmarks
+    /// It takes the [`EventId`] of the Bookmark event
+    /// sent in the bookmarks room.
+    pub async fn unbookmark_event(
+        &self,
+        bookmark_event_id: &EventId,
+    ) -> crate::Result<redact_event::v3::Response> {
+        let redact_closure = move |r: Room| async move {
+            r.redact(bookmark_event_id, Some("Bookmark removal"), None).await
+        };
+        let maybe_result = self.with_bookmarks_room(redact_closure, true).await;
+        maybe_result
+            .ok_or(crate::Error::BookmarksError)?
+            .await
+            .map_err(|e| crate::Error::Http(Box::new(e)))
+    }
+
+    /// Checks whether an event is bookmarked or not from its original
+    /// event_id and returns its associated bookmark_event_id if its
+    /// the case.
+    pub async fn is_event_bookmarked(&self, original_event_id: &EventId) -> Option<OwnedEventId> {
+        self.bookmark_index().lock().await.get_bookmark_id_for_event(original_event_id)
     }
 }
 

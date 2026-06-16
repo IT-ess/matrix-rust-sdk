@@ -162,11 +162,26 @@ impl BookmarkIndexGuard<'_> {
     /// Check if the bookmark index contains an event
     /// This method does not create the index if it doesn't
     /// exist.
-    fn contains_message(&self, original_event_id: &EventId) -> bool {
+    pub(crate) fn contains_message(&self, original_event_id: &EventId) -> bool {
         if let Some(index) = self.index.as_ref() {
             index.contains_bookmark(original_event_id)
         } else {
             false
+        }
+    }
+
+    /// Check if the bookmark index contains an event and return its
+    /// bookmark_event_id if its the case.
+    /// This method does not create the index if it doesn't
+    /// exist.
+    pub(crate) fn get_bookmark_id_for_event(
+        &self,
+        original_event_id: &EventId,
+    ) -> Option<OwnedEventId> {
+        if let Some(index) = self.index.as_ref() {
+            index.get_bookmark_id_for_event(original_event_id)
+        } else {
+            None
         }
     }
 

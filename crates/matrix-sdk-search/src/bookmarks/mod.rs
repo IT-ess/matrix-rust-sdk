@@ -423,6 +423,28 @@ impl BookmarkIndex {
             }
         }
     }
+
+    /// Check from an original_event_id if there is a bookmark, and return
+    /// its pointer_event_id if its the case.
+    pub fn get_bookmark_id_for_event(&self, original_event_id: &EventId) -> Option<OwnedEventId> {
+        let search_result = self.search(
+            format!(
+                "{}:\"{original_event_id}\"",
+                self.schema.get_field_name(self.schema.deletion_key())
+            )
+            .as_str(),
+            1,
+            None,
+            None,
+        );
+        match search_result {
+            Ok(results) => results.into_iter().next().map(|bookmark| bookmark.pointer_event_id),
+            Err(err) => {
+                warn!("Failed to check if event has been indexed, assuming it wasn't: {err}");
+                None
+            }
+        }
+    }
 }
 
 /// Necessary information to identify a unique bookmark.
