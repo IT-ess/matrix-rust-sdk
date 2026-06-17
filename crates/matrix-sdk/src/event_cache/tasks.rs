@@ -573,11 +573,6 @@ pub(super) async fn bookmark_indexing_task(
                     continue;
                 };
 
-                let maybe_room_cache = client.event_cache().for_room(&room_id).await;
-                let Ok((room_cache, _drop_handles)) = maybe_room_cache else {
-                    warn!(for_room = %room_id, "Failed to get RoomEventCache: {maybe_room_cache:?}");
-                    continue;
-                };
                 let mut bookmark_index_guard = client.bookmark_index().lock().await;
 
                 let redaction_rules = room.clone_info().room_version_rules_or_default().redaction;
@@ -589,7 +584,6 @@ pub(super) async fn bookmark_indexing_task(
                                 .bulk_handle_bookmark_event(
                                     timeline_events,
                                     &client,
-                                    &room_cache,
                                     &redaction_rules,
                                 )
                                 .await
@@ -602,6 +596,11 @@ pub(super) async fn bookmark_indexing_task(
                         _ => continue, // We don't handle other room types
                     }
                 } else {
+                    let maybe_room_cache = client.event_cache().for_room(&room_id).await;
+                    let Ok((room_cache, _drop_handles)) = maybe_room_cache else {
+                        warn!(for_room = %room_id, "Failed to get RoomEventCache: {maybe_room_cache:?}");
+                        continue;
+                    };
                     if let Err(err) = bookmark_index_guard
                         .bulk_handle_timeline_event(timeline_events, &room_cache, &redaction_rules)
                         .await

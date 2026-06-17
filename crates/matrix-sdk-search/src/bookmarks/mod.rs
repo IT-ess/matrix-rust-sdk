@@ -51,6 +51,9 @@ pub enum BookmarkIndexOperation {
     /// Remove all documents in the index where
     /// `MatrixBookmarkIndexSchema::deletion_key()` matches this event id.
     Remove(OwnedEventId),
+    /// Remove all documents in the index where
+    /// `MatrixBookmarkIndexSchema::pointer_event_id_key()` matches this event id.
+    RemoveWithBookmarkId(OwnedEventId),
     /// Replace all documents in the index where
     /// `MatrixBookmarkIndexSchema::deletion_key()` matches this event id with
     /// the new event.
@@ -220,11 +223,14 @@ impl BookmarkIndex {
 
     fn get_events_to_be_removed(
         &self,
-        event_id: &EventId,
+        original_event_id: &EventId,
     ) -> Result<Vec<IndexedBookmark>, IndexError> {
         self.search(
-            format!("{}:\"{event_id}\"", self.schema.get_field_name(self.schema.deletion_key()))
-                .as_str(),
+            format!(
+                "{}:\"{original_event_id}\"",
+                self.schema.get_field_name(self.schema.deletion_key())
+            )
+            .as_str(),
             10000,
             None,
             None,
@@ -257,7 +263,7 @@ impl BookmarkIndex {
 
         // When we edit an event, we remove the previous one(s) and then recreate
         // it. We need to pass some info from the previously saved bookmark for this
-        // to work.
+        // to work. This info will be used only if this is an edition.
         let Some(pointer_info) = events.first().map(|bookmark| BookmarkPointerInfo {
             original_event_id,
             room_id: bookmark.room_id.clone(),
@@ -286,6 +292,15 @@ impl BookmarkIndex {
             }
             BookmarkIndexOperation::Remove(event_id) => {
                 self.remove(writer, event_id)?;
+            }
+            BookmarkIndexOperation::RemoveWithBookmarkId(event_id) => {
+                if let Some(original_event_id) =
+                    self.get_original_event_id_from_bookmark_id(&event_id)
+                {
+                    self.remove(writer, original_event_id)?;
+                } else {
+                    warn!("Couldn't find pointed event for redacted bookmark.")
+                }
             }
             BookmarkIndexOperation::Edit(original_event_id, bookmark_content) => {
                 let pointer_info = self.remove(writer, original_event_id)?;
@@ -439,6 +454,31 @@ impl BookmarkIndex {
         );
         match search_result {
             Ok(results) => results.into_iter().next().map(|bookmark| bookmark.pointer_event_id),
+            Err(err) => {
+                warn!("Failed to check if event has been indexed, assuming it wasn't: {err}");
+                None
+            }
+        }
+    }
+
+    /// Check from an original_event_id if there is a bookmark, and return
+    /// its pointer_event_id if its the case.
+    pub fn get_original_event_id_from_bookmark_id(
+        &self,
+        pointer_event_id: &EventId,
+    ) -> Option<OwnedEventId> {
+        let search_result = self.search(
+            format!(
+                "{}:\"{pointer_event_id}\"",
+                self.schema.get_field_name(self.schema.pointer_event_id_key())
+            )
+            .as_str(),
+            1,
+            None,
+            None,
+        );
+        match search_result {
+            Ok(results) => results.into_iter().next().map(|bookmark| bookmark.original_event_id),
             Err(err) => {
                 warn!("Failed to check if event has been indexed, assuming it wasn't: {err}");
                 None

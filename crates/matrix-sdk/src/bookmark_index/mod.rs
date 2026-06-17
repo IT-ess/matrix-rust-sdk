@@ -31,7 +31,7 @@ use matrix_sdk_search::{
 use ruma::{
     EventId, OwnedEventId, RoomId,
     events::{
-        AnySyncMessageLikeEvent, AnySyncTimelineEvent,
+        AnySyncMessageLikeEvent,
         bookmark::SyncBookmarkEvent,
         room::{
             message::{MessageType, OriginalSyncRoomMessageEvent, Relation, SyncRoomMessageEvent},
@@ -159,21 +159,29 @@ impl BookmarkIndexGuard<'_> {
         }
     }
 
-    /// Check if the bookmark index contains an event
-    /// This method does not create the index if it doesn't
-    /// exist.
+    /// Check if the bookmark index contains an event.
+    /// Never fails, and creates the index in memory if
+    /// it hasn't been created before.
     pub(crate) fn contains_message(&self, original_event_id: &EventId) -> bool {
         if let Some(index) = self.index.as_ref() {
             index.contains_bookmark(original_event_id)
         } else {
-            false
+            match self.create_index() {
+                Ok(index) => index.contains_bookmark(original_event_id),
+                Err(err) => {
+                    warn!(
+                        "Failed to open the bookmark index, assuming the event isn't bookmarked: {err}"
+                    );
+                    false
+                }
+            }
         }
     }
 
     /// Check if the bookmark index contains an event and return its
     /// bookmark_event_id if its the case.
-    /// This method does not create the index if it doesn't
-    /// exist.
+    /// Never fails, and creates the index in memory if
+    /// it hasn't been created before.
     pub(crate) fn get_bookmark_id_for_event(
         &self,
         original_event_id: &EventId,
@@ -181,7 +189,15 @@ impl BookmarkIndexGuard<'_> {
         if let Some(index) = self.index.as_ref() {
             index.get_bookmark_id_for_event(original_event_id)
         } else {
-            None
+            match self.create_index() {
+                Ok(index) => index.get_bookmark_id_for_event(original_event_id),
+                Err(err) => {
+                    warn!(
+                        "Failed to open the bookmark index, assuming there is no bookmark for that event: {err}"
+                    );
+                    None
+                }
+            }
         }
     }
 
@@ -215,12 +231,11 @@ impl BookmarkIndexGuard<'_> {
     pub async fn handle_bookmark_event(
         &mut self,
         client: &Client,
-        bookmarks_room_cache: &RoomEventCache,
         event: TimelineEvent,
         redaction_rules: &RedactionRules,
     ) -> Result<(), IndexError> {
         if let Some(index_operation) =
-            parse_bookmarks_room_event(client, bookmarks_room_cache, event, redaction_rules).await
+            parse_bookmarks_room_event(client, event, redaction_rules).await
         {
             self.execute(index_operation)
         } else {
@@ -253,15 +268,12 @@ impl BookmarkIndexGuard<'_> {
         &mut self,
         events: T,
         client: &Client,
-        bookmarks_room_cache: &RoomEventCache,
         redaction_rules: &RedactionRules,
     ) -> Result<(), IndexError>
     where
         T: Iterator<Item = TimelineEvent>,
     {
-        let futures = events.map(|ev| {
-            parse_bookmarks_room_event(client, bookmarks_room_cache, ev, redaction_rules)
-        });
+        let futures = events.map(|ev| parse_bookmarks_room_event(client, ev, redaction_rules));
 
         let operations: Vec<_> = join_all(futures).await.into_iter().flatten().collect();
 
@@ -426,27 +438,33 @@ async fn handle_possible_edit(
 
 /// Fetch the referenced bookmarked event and return a
 /// [`BookmarkIndexOperation::Add`].
-async fn handle_new_bookmark(
+async fn handle_sync_bookmark(
     bookmark_event: SyncBookmarkEvent,
     client: &Client,
 ) -> Option<BookmarkIndexOperation> {
-    if let Some(bookmark) = bookmark_event.as_original()
-        && let Ok((cache, _)) =
-            client.event_cache().for_room(&bookmark.content.pointer.room_id).await
-        && let Some(content) = get_most_recent_edit(
-            &cache,
-            &bookmark.content.pointer.event_id,
-            Some((client, &bookmark.content.pointer.room_id)),
-        )
-        .await
-    {
-        Some(BookmarkIndexOperation::Add(
-            bookmark.to_owned(),
-            convert_room_message_into_bookmark_content(content),
-        ))
-    } else {
-        warn!("Couldn't find pointed event for bookmark.");
-        None
+    match bookmark_event {
+        SyncBookmarkEvent::Original(bookmark) => {
+            if let Ok((cache, _)) =
+                client.event_cache().for_room(&bookmark.content.pointer.room_id).await
+                && let Some(content) = get_most_recent_edit(
+                    &cache,
+                    &bookmark.content.pointer.event_id,
+                    Some((client, &bookmark.content.pointer.room_id)),
+                )
+                .await
+            {
+                Some(BookmarkIndexOperation::Add(
+                    bookmark.to_owned(),
+                    convert_room_message_into_bookmark_content(content),
+                ))
+            } else {
+                warn!("Couldn't find pointed event for bookmark.");
+                None
+            }
+        }
+        SyncBookmarkEvent::Redacted(redacted) => {
+            Some(BookmarkIndexOperation::RemoveWithBookmarkId(redacted.event_id))
+        }
     }
 }
 
@@ -477,30 +495,17 @@ fn convert_room_message_into_bookmark_content(
 
 /// Return a [`BookmarkIndexOperation::Remove`] or nothing
 /// depending on the message.
-async fn handle_bookmark_redaction(
+fn handle_bookmark_redaction(
     event: SyncRoomRedactionEvent,
-    cache: &RoomEventCache,
     rules: &RedactionRules,
 ) -> Option<BookmarkIndexOperation> {
-    if let Some(redacted_event_id) = event.redacts(rules)
-        && let Ok(Some(redacted_event)) = cache.find_event(redacted_event_id).await
-        && let Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::Bookmark(
-            redacted_event,
-        ))) = redacted_event.raw().deserialize()
-        && let SyncBookmarkEvent::Original(redacted_event) = redacted_event
-    {
-        // The pointed event is the deletion key in the index
-        Some(BookmarkIndexOperation::Remove(redacted_event.content.pointer.event_id))
-    } else {
-        None
-    }
+    event.redacts(rules).map(|id| BookmarkIndexOperation::RemoveWithBookmarkId(id.to_owned()))
 }
 
 /// Prepare a [`TimelineEvent`] of the `m.bookmarks` room into a
 /// [`BookmarkIndexOperation`] for bookmark indexing.
 async fn parse_bookmarks_room_event(
     client: &Client,
-    bookmarks_room_cache: &RoomEventCache,
     event: TimelineEvent,
     redaction_rules: &RedactionRules,
 ) -> Option<BookmarkIndexOperation> {
@@ -514,10 +519,10 @@ async fn parse_bookmarks_room_event(
         Ok(event) => match event {
             AnySyncTimelineEvent::MessageLike(event) => match event {
                 AnySyncMessageLikeEvent::Bookmark(event) => {
-                    handle_new_bookmark(event, client).await
+                    handle_sync_bookmark(event, client).await
                 }
                 AnySyncMessageLikeEvent::RoomRedaction(event) => {
-                    handle_bookmark_redaction(event, bookmarks_room_cache, redaction_rules).await
+                    handle_bookmark_redaction(event, redaction_rules)
                 }
                 _ => None,
             },
