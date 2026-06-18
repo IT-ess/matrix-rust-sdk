@@ -110,6 +110,17 @@ impl BookmarkIndexGuard<'_> {
         Ok(index)
     }
 
+    /// Return a mutable reference to the [`BookmarkIndex`], creating and storing
+    /// it first if it hasn't been initialized yet.
+    fn get_or_create_index(&mut self) -> Result<&mut BookmarkIndex, IndexError> {
+        if self.index.is_none() {
+            let index = self.create_index()?;
+            *self.index = Some(index);
+        }
+
+        Ok(self.index.as_mut().expect("index should exist"))
+    }
+
     /// Handle a [`BookmarkIndexOperation`] in the [`BookmarkIndex`]
     ///
     /// This which will add/remove/edit an event in the index based on the
@@ -117,12 +128,7 @@ impl BookmarkIndexGuard<'_> {
     ///
     /// Prefer [`BookmarkIndexGuard::bulk_execute`] for multiple operations.
     pub(crate) fn execute(&mut self, operation: BookmarkIndexOperation) -> Result<(), IndexError> {
-        if let Some(index) = self.index.as_mut() {
-            index.execute(operation)
-        } else {
-            let mut index = self.create_index()?;
-            index.execute(operation)
-        }
+        self.get_or_create_index()?.execute(operation)
     }
 
     /// Handle a [`BookmarkIndexOperation`] in the [`BookmarkIndex`]
@@ -133,12 +139,7 @@ impl BookmarkIndexGuard<'_> {
         &mut self,
         operations: Vec<BookmarkIndexOperation>,
     ) -> Result<(), IndexError> {
-        if let Some(index) = self.index.as_mut() {
-            index.bulk_execute(operations)
-        } else {
-            let mut index = self.create_index()?;
-            index.bulk_execute(operations)
-        }
+        self.get_or_create_index()?.bulk_execute(operations)
     }
 
     /// Search the global bookmark index for the query and return at most
@@ -151,12 +152,14 @@ impl BookmarkIndexGuard<'_> {
         pagination_offset: Option<usize>,
         room_id_filter: Option<&RoomId>,
     ) -> Result<Vec<IndexedBookmark>, IndexError> {
-        if let Some(index) = self.index.as_ref() {
-            index.search(query, max_number_of_results, pagination_offset, room_id_filter)
-        } else {
-            let index = self.create_index()?;
-            index.search(query, max_number_of_results, pagination_offset, room_id_filter)
-        }
+        let res = self.get_or_create_index()?.search(
+            query,
+            max_number_of_results,
+            pagination_offset,
+            room_id_filter,
+        )?;
+        tracing::warn!("SEARCH RES : {res:?}");
+        Ok(res)
     }
 
     /// Check if the bookmark index contains an event.
@@ -536,125 +539,309 @@ async fn parse_bookmarks_room_event(
     }
 }
 
-// #[cfg(test)]
-// mod tests {
-//     use matrix_sdk_test::{JoinedRoomBuilder, async_test, event_factory::EventFactory};
-//     use ruma::{
-//         event_id, events::room::message::RoomMessageEventContentWithoutRelation, room_id, user_id,
-//     };
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
 
-//     use crate::test_utils::mocks::MatrixMockServer;
+    use matrix_sdk_search::bookmarks::IndexedBookmark;
+    use matrix_sdk_test::{JoinedRoomBuilder, async_test, event_factory::EventFactory};
+    use ruma::{
+        EventId, RoomVersionId, event_id,
+        events::{
+            bookmark::{BookmarkEventContent, PointerContentBlock},
+            room::message::RoomMessageEventContentWithoutRelation,
+        },
+        room_id, user_id,
+    };
 
-//     #[cfg(feature = "experimental-search")]
-//     #[async_test]
-//     async fn test_sync_message_is_indexed() {
-//         let mock_server = MatrixMockServer::new().await;
-//         let client = mock_server.client_builder().build().await;
+    use crate::{Room, test_utils::mocks::MatrixMockServer};
 
-//         client.event_cache().subscribe().unwrap();
+    /// Bookmark indexing happens in a background task, so poll the index until
+    /// the bookmark pointing to `expected_event_id` shows up (or time out).
+    async fn wait_for_bookmark(
+        room: &Room,
+        query: &str,
+        expected_event_id: &EventId,
+    ) -> Vec<IndexedBookmark> {
+        for _ in 0..100 {
+            let results = room.search_room_bookmarks(query, 5, None).await.unwrap();
+            if results.iter().any(|bookmark| bookmark.event_id == expected_event_id) {
+                return results;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("timed out waiting for the bookmark of {expected_event_id} to be indexed");
+    }
 
-//         let room_id = room_id!("!room_id:localhost");
-//         let event_id = event_id!("$event_id:localost");
-//         let user_id = user_id!("@user_id:localost");
+    /// Like [`wait_for_bookmark`], but waits until at least `count` bookmarks
+    /// match the query (or times out).
+    async fn wait_for_bookmark_count(
+        room: &Room,
+        query: &str,
+        count: usize,
+    ) -> Vec<IndexedBookmark> {
+        for _ in 0..100 {
+            let results = room.search_room_bookmarks(query, 10, None).await.unwrap();
+            if results.len() >= count {
+                return results;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("timed out waiting for {count} bookmarks to be indexed");
+    }
 
-//         let event_factory = EventFactory::new();
-//         let room = mock_server
-//             .sync_room(
-//                 &client,
-//                 JoinedRoomBuilder::new(room_id).add_timeline_bulk(vec![
-//                     event_factory
-//                         .text_msg("this is a sentence")
-//                         .event_id(event_id)
-//                         .sender(user_id)
-//                         .into_raw_sync(),
-//                 ]),
-//             )
-//             .await;
+    #[async_test]
+    async fn test_sync_bookmark_is_indexed() {
+        let mock_server = MatrixMockServer::new().await;
+        let client = mock_server.client_builder().build().await;
 
-//         let response = room.search("this", 5, None).await.expect("search should have 1 result");
+        client.event_cache().subscribe().unwrap();
 
-//         assert_eq!(response.len(), 1, "unexpected numbers of responses: {response:?}");
-//         assert_eq!(response[0], event_id, "event id doesn't match: {response:?}");
-//     }
+        let room_id = room_id!("!room_id:localhost");
+        let bookmarks_room_id = room_id!("!bookmarks_room_id:localhost");
+        let event_id = event_id!("$event_id:localhost");
+        let bookmark_event_id = event_id!("$bookmark_event_id:localhost");
+        let user_id = user_id!("@user_id:localhost");
 
-//     #[cfg(feature = "experimental-search")]
-//     #[async_test]
-//     async fn test_search_index_edit_ordering() {
-//         let room_id = room_id!("!room_id:localhost");
-//         let dummy_id = event_id!("$dummy");
-//         let edit1_id = event_id!("$edit1");
-//         let edit2_id = event_id!("$edit2");
-//         let edit3_id = event_id!("$edit3");
-//         let original_id = event_id!("$original");
+        let f = EventFactory::new().sender(user_id);
 
-//         let server = MatrixMockServer::new().await;
-//         let client = server.client_builder().build().await;
+        // Sync the regular room that contains the message we are going to bookmark.
+        let room = mock_server
+            .sync_room(
+                &client,
+                JoinedRoomBuilder::new(room_id).add_timeline_bulk(vec![
+                    f.text_msg("this is a sentence")
+                        .event_id(event_id)
+                        .room(room_id)
+                        .into_raw_sync(),
+                ]),
+            )
+            .await;
 
-//         let event_cache = client.event_cache();
-//         event_cache.subscribe().unwrap();
+        // Sync the bookmarks room with a bookmark event that points to the message.
+        let pointer = PointerContentBlock::new(room_id.to_owned(), event_id.to_owned(), vec![]);
+        let bookmark = f
+            .event(BookmarkEventContent::new(pointer, "user", "room"))
+            .event_id(bookmark_event_id)
+            .room(bookmarks_room_id);
 
-//         let room = server.sync_joined_room(&client, room_id).await;
+        mock_server
+            .sync_room(
+                &client,
+                JoinedRoomBuilder::new(bookmarks_room_id)
+                    .add_state_event(f.create(user_id, RoomVersionId::V11).with_bookmarks_type())
+                    .add_timeline_event(bookmark),
+            )
+            .await;
 
-//         let f = EventFactory::new().room(room_id).sender(user_id!("@user_id:localhost"));
+        let response = wait_for_bookmark(&room, "this", event_id).await;
 
-//         // Indexable dummy message required because BookmarkIndex is initialised lazily.
-//         let dummy = f.text_msg("dummy").event_id(dummy_id);
+        assert_eq!(response.len(), 1, "unexpected numbers of responses: {response:?}");
+        assert_eq!(
+            response[0].original_event_id, event_id,
+            "bookmarked event id doesn't match: {response:?}"
+        );
+        assert_eq!(
+            response[0].pointer_event_id, bookmark_event_id,
+            "bookmark pointer event id doesn't match: {response:?}"
+        );
+    }
 
-//         let original = f.text_msg("This is a message").event_id(original_id);
+    #[async_test]
+    async fn test_bookmark_index_edit_ordering() {
+        let room_id = room_id!("!room_id:localhost");
+        let bookmarks_room_id = room_id!("!bookmarks_room_id:localhost");
+        let bookmark_event_id = event_id!("$bookmark_event_id:localhost");
+        let edit1_id = event_id!("$edit1");
+        let edit2_id = event_id!("$edit2");
+        let edit3_id = event_id!("$edit3");
+        let original_id = event_id!("$original");
+        let user_id = user_id!("@user_id:localhost");
 
-//         let edit1 = f
-//             .text_msg("* A new message")
-//             .edit(original_id, RoomMessageEventContentWithoutRelation::text_plain("A new message"))
-//             .event_id(edit1_id);
+        let server = MatrixMockServer::new().await;
+        let client = server.client_builder().build().await;
 
-//         let edit2 = f
-//             .text_msg("* An even newer message")
-//             .edit(
-//                 original_id,
-//                 RoomMessageEventContentWithoutRelation::text_plain("An even newer message"),
-//             )
-//             .event_id(edit2_id);
+        let event_cache = client.event_cache();
+        event_cache.subscribe().unwrap();
 
-//         let edit3 = f
-//             .text_msg("* The newest message")
-//             .edit(
-//                 original_id,
-//                 RoomMessageEventContentWithoutRelation::text_plain("The newest message"),
-//             )
-//             .event_id(edit3_id);
+        let room = server.sync_joined_room(&client, room_id).await;
 
-//         server
-//             .sync_room(
-//                 &client,
-//                 JoinedRoomBuilder::new(room_id)
-//                     .add_timeline_event(dummy)
-//                     .add_timeline_event(edit1)
-//                     .add_timeline_event(edit2),
-//             )
-//             .await;
+        let f = EventFactory::new().room(room_id).sender(user_id);
 
-//         let results = room.search("message", 3, None).await.unwrap();
+        let original = f.text_msg("This is a message").event_id(original_id);
 
-//         assert_eq!(results.len(), 0, "Search should return 0 results, got {results:?}");
+        let edit1 = f
+            .text_msg("* A new message")
+            .edit(original_id, RoomMessageEventContentWithoutRelation::text_plain("A new message"))
+            .event_id(edit1_id);
 
-//         // Adding the original after some pending edits should add the latest edit
-//         // instead of the original.
-//         server
-//             .sync_room(&client, JoinedRoomBuilder::new(room_id).add_timeline_event(original))
-//             .await;
+        let edit2 = f
+            .text_msg("* An even newer message")
+            .edit(
+                original_id,
+                RoomMessageEventContentWithoutRelation::text_plain("An even newer message"),
+            )
+            .event_id(edit2_id);
 
-//         let results = room.search("message", 3, None).await.unwrap();
+        let edit3 = f
+            .text_msg("* The newest message")
+            .edit(
+                original_id,
+                RoomMessageEventContentWithoutRelation::text_plain("The newest message"),
+            )
+            .event_id(edit3_id);
 
-//         assert_eq!(results.len(), 1, "Search should return 1 result, got {results:?}");
-//         assert_eq!(results[0], edit2_id, "Search should return latest edit, got {:?}", results[0]);
+        // The original message and two edits are already in the room before it gets
+        // bookmarked.
+        server
+            .sync_room(
+                &client,
+                JoinedRoomBuilder::new(room_id)
+                    .add_timeline_event(original)
+                    .add_timeline_event(edit1)
+                    .add_timeline_event(edit2),
+            )
+            .await;
 
-//         // Editing the original after it exists and there has been another edit should
-//         // delete the previous edits and add this one
-//         server.sync_room(&client, JoinedRoomBuilder::new(room_id).add_timeline_event(edit3)).await;
+        // Nothing is bookmarked yet, so there are no results.
+        let results = room.search_room_bookmarks("message", 3, None).await.unwrap();
+        assert_eq!(results.len(), 0, "Search should return 0 results, got {results:?}");
 
-//         let results = room.search("message", 3, None).await.unwrap();
+        // Bookmarking the original after some edits should index the latest edit
+        // instead of the original.
+        let pointer = PointerContentBlock::new(room_id.to_owned(), original_id.to_owned(), vec![]);
+        let bookmark = f
+            .event(BookmarkEventContent::new(pointer, "user", "room"))
+            .event_id(bookmark_event_id)
+            .room(bookmarks_room_id);
 
-//         assert_eq!(results.len(), 1, "Search should return 1 result, got {results:?}");
-//         assert_eq!(results[0], edit3_id, "Search should return latest edit, got {:?}", results[0]);
-//     }
-// }
+        server
+            .sync_room(
+                &client,
+                JoinedRoomBuilder::new(bookmarks_room_id)
+                    .add_state_event(f.create(user_id, RoomVersionId::V11).with_bookmarks_type())
+                    .add_timeline_event(bookmark),
+            )
+            .await;
+
+        let results = wait_for_bookmark(&room, "message", edit2_id).await;
+
+        assert_eq!(results.len(), 1, "Search should return 1 result, got {results:?}");
+        assert_eq!(
+            results[0].event_id, edit2_id,
+            "Search should return latest edit, got {:?}",
+            results[0]
+        );
+        assert_eq!(
+            results[0].original_event_id, original_id,
+            "Search should keep the original event id, got {:?}",
+            results[0]
+        );
+
+        // Editing the original after it has been bookmarked should delete the previous
+        // edits and index this one.
+        server.sync_room(&client, JoinedRoomBuilder::new(room_id).add_timeline_event(edit3)).await;
+
+        let results = wait_for_bookmark(&room, "message", edit3_id).await;
+
+        assert_eq!(results.len(), 1, "Search should return 1 result, got {results:?}");
+        assert_eq!(
+            results[0].event_id, edit3_id,
+            "Search should return latest edit, got {:?}",
+            results[0]
+        );
+        assert_eq!(
+            results[0].original_event_id, original_id,
+            "Search should keep the original event id, got {:?}",
+            results[0]
+        );
+    }
+
+    #[async_test]
+    async fn test_bookmark_search_relevancy() {
+        let room_id = room_id!("!room_id:localhost");
+        let bookmarks_room_id = room_id!("!bookmarks_room_id:localhost");
+        let user_id = user_id!("@user_id:localhost");
+
+        // The event holding the search term once, and the bookmark pointing to it.
+        let low_id = event_id!("$low");
+        let low_bookmark_id = event_id!("$low_bookmark");
+        // The event holding the search term several times, and its bookmark.
+        let high_id = event_id!("$high");
+        let high_bookmark_id = event_id!("$high_bookmark");
+
+        let server = MatrixMockServer::new().await;
+        let client = server.client_builder().build().await;
+
+        client.event_cache().subscribe().unwrap();
+
+        let f = EventFactory::new().sender(user_id);
+
+        // Two bookmarkable messages: both mention "matrix", but one mentions it more
+        // often, so it should score higher.
+        let room = server
+            .sync_room(
+                &client,
+                JoinedRoomBuilder::new(room_id).add_timeline_bulk(vec![
+                    f.text_msg("matrix is a protocol")
+                        .event_id(low_id)
+                        .room(room_id)
+                        .into_raw_sync(),
+                    f.text_msg("matrix matrix matrix is the best matrix")
+                        .event_id(high_id)
+                        .room(room_id)
+                        .into_raw_sync(),
+                ]),
+            )
+            .await;
+
+        // Bookmark both messages in the bookmarks room.
+        let low_bookmark = f
+            .event(BookmarkEventContent::new(
+                PointerContentBlock::new(room_id.to_owned(), low_id.to_owned(), vec![]),
+                "user",
+                "room",
+            ))
+            .event_id(low_bookmark_id)
+            .room(bookmarks_room_id);
+
+        let high_bookmark = f
+            .event(BookmarkEventContent::new(
+                PointerContentBlock::new(room_id.to_owned(), high_id.to_owned(), vec![]),
+                "user",
+                "room",
+            ))
+            .event_id(high_bookmark_id)
+            .room(bookmarks_room_id);
+
+        server
+            .sync_room(
+                &client,
+                JoinedRoomBuilder::new(bookmarks_room_id)
+                    .add_state_event(f.create(user_id, RoomVersionId::V12).with_bookmarks_type())
+                    .add_timeline_event(low_bookmark)
+                    .add_timeline_event(high_bookmark),
+            )
+            .await;
+
+        let results = wait_for_bookmark_count(&room, "matrix", 2).await;
+
+        assert_eq!(results.len(), 2, "Search should return 2 results, got {results:?}");
+        // The message mentioning "matrix" more often must rank first.
+        assert_eq!(
+            results[0].event_id, high_id,
+            "Most relevant bookmark should rank first, got {results:?}"
+        );
+        assert_eq!(
+            results[1].event_id, low_id,
+            "Least relevant bookmark should rank last, got {results:?}"
+        );
+        assert!(
+            results[0].score > results[1].score,
+            "Scores should be ordered descending, got {results:?}"
+        );
+
+        println!("SCORE 1: {}", results[0].score);
+        println!("SCORE 2: {}", results[1].score);
+    }
+}

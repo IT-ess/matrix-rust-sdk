@@ -27,8 +27,8 @@ use tantivy::{
     Index, IndexReader, TantivyDocument, Term,
     collector::TopDocs,
     directory::error::OpenDirectoryError,
-    query::{BooleanQuery, Occur, QueryParser, TermQuery},
-    schema::{IndexRecordOption, Value},
+    query::{BooleanQuery, Occur, Query, QueryParser, TermQuery},
+    schema::{Field, IndexRecordOption, Value},
 };
 use tracing::{debug, warn};
 
@@ -158,15 +158,26 @@ impl BookmarkIndex {
                 Box::new(TermQuery::new(room_term, IndexRecordOption::WithFreqs));
             BooleanQuery::new(vec![(Occur::Must, base_query), (Occur::Must, room_filter_query)])
         } else {
-            BooleanQuery::new(vec![(Occur::Must, base_query)])
+            BooleanQuery::new(vec![(Occur::Should, base_query)])
         };
 
+        self.run_query(&full_query, max_number_of_results, pagination_offset)
+    }
+
+    /// Run a tantivy [`Query`] and reconstruct the matching
+    /// [`IndexedBookmark`]s.
+    fn run_query(
+        &self,
+        query: &dyn Query,
+        max_number_of_results: usize,
+        pagination_offset: Option<usize>,
+    ) -> Result<Vec<IndexedBookmark>, IndexError> {
         let searcher = self.get_reader()?.searcher();
 
         let offset = pagination_offset.unwrap_or(0);
 
         let results = searcher.search(
-            &full_query,
+            query,
             &TopDocs::with_limit(max_number_of_results).and_offset(offset).order_by_score(),
         )?;
         let mut ret: Vec<IndexedBookmark> = Vec::new();
@@ -206,6 +217,8 @@ impl BookmarkIndex {
                 date_value.into_timestamp_millis() as u64,
             ));
 
+            tracing::info!("OUTPUT SCORE: {score}");
+
             ret.push(IndexedBookmark {
                 body: extract_str(self.schema.body_key()).unwrap_or_default().to_owned(),
                 event_id,
@@ -221,20 +234,42 @@ impl BookmarkIndex {
         Ok(ret)
     }
 
-    fn get_events_to_be_removed(
+    /// Find all indexed bookmarks for which the given text `field` exactly
+    /// matches `event_id`.
+    ///
+    /// This uses an exact [`TermQuery`] rather than the [`QueryParser`], because
+    /// event ids contain characters (e.g. `$`, `:`, `-`) that the query parser
+    /// interprets as syntax, which would prevent any match.
+    fn find_by_event_id_field(
+        &self,
+        field: Field,
+        event_id: &EventId,
+        max_number_of_results: usize,
+    ) -> Result<Vec<IndexedBookmark>, IndexError> {
+        let term = Term::from_field_text(field, event_id.as_str());
+        let query = TermQuery::new(term, IndexRecordOption::Basic);
+        self.run_query(&query, max_number_of_results, None)
+    }
+
+    /// Find all indexed bookmarks whose deletion key (the original/root event
+    /// id of the bookmarked message) matches the given event id.
+    fn find_by_original_event_id(
         &self,
         original_event_id: &EventId,
+        max_number_of_results: usize,
     ) -> Result<Vec<IndexedBookmark>, IndexError> {
-        self.search(
-            format!(
-                "{}:\"{original_event_id}\"",
-                self.schema.get_field_name(self.schema.deletion_key())
-            )
-            .as_str(),
-            10000,
-            None,
-            None,
+        self.find_by_event_id_field(
+            self.schema.deletion_key(),
+            original_event_id,
+            max_number_of_results,
         )
+    }
+
+    fn get_events_to_be_removed(
+        &self,
+        event_id: &EventId,
+    ) -> Result<Vec<IndexedBookmark>, IndexError> {
+        self.find_by_original_event_id(event_id, 10000)
     }
 
     fn add(
@@ -398,13 +433,7 @@ impl BookmarkIndex {
     }
 
     fn contains(&self, event_id: &EventId) -> bool {
-        let search_result = self.search(
-            format!("{}:\"{event_id}\"", self.schema.get_field_name(self.schema.primary_key()))
-                .as_str(),
-            1,
-            None,
-            None,
-        );
+        let search_result = self.find_by_event_id_field(self.schema.primary_key(), event_id, 1);
         match search_result {
             Ok(results) => {
                 !self.uncommitted_removes.contains(event_id)
@@ -420,17 +449,7 @@ impl BookmarkIndex {
     /// Check the presence of a record with its deletion key (the original version of the bookmarked
     /// message)
     pub fn contains_bookmark(&self, original_event_id: &EventId) -> bool {
-        let search_result = self.search(
-            format!(
-                "{}:\"{original_event_id}\"",
-                self.schema.get_field_name(self.schema.deletion_key())
-            )
-            .as_str(),
-            1,
-            None,
-            None,
-        );
-        match search_result {
+        match self.find_by_original_event_id(original_event_id, 1) {
             Ok(results) => !results.is_empty(),
             Err(err) => {
                 warn!("Failed to check if event has been indexed, assuming it wasn't: {err}");
@@ -442,17 +461,7 @@ impl BookmarkIndex {
     /// Check from an original_event_id if there is a bookmark, and return
     /// its pointer_event_id if its the case.
     pub fn get_bookmark_id_for_event(&self, original_event_id: &EventId) -> Option<OwnedEventId> {
-        let search_result = self.search(
-            format!(
-                "{}:\"{original_event_id}\"",
-                self.schema.get_field_name(self.schema.deletion_key())
-            )
-            .as_str(),
-            1,
-            None,
-            None,
-        );
-        match search_result {
+        match self.find_by_original_event_id(original_event_id, 1) {
             Ok(results) => results.into_iter().next().map(|bookmark| bookmark.pointer_event_id),
             Err(err) => {
                 warn!("Failed to check if event has been indexed, assuming it wasn't: {err}");
@@ -535,238 +544,291 @@ pub struct IndexedBookmark {
     pub score: f32,
 }
 
-// #[cfg(test)]
-// mod tests {
-//     use std::{collections::HashSet, error::Error};
+#[cfg(test)]
+mod tests {
+    use ruma::{
+        MilliSecondsSinceUnixEpoch, event_id, owned_event_id, owned_room_id, owned_user_id, uint,
+    };
 
-//     use matrix_sdk_test::event_factory::EventFactory;
-//     use ruma::{
-//         EventId, event_id,
-//         events::{
-//             AnySyncMessageLikeEvent,
-//             room::message::{OriginalSyncRoomMessageEvent, RoomMessageEventContentWithoutRelation},
-//         },
-//         room_id, user_id,
-//     };
+    use super::{BookmarkContent, BookmarkIndex, BookmarkPointerInfo};
+    use crate::bookmarks::builder::BookmarkIndexBuilder;
 
-//     use crate::{
-//         bookmarks::{BookmarkIndex, BookmarkIndexOperation},
-//         error::IndexError,
-//     };
+    /// Index a bookmark with the given (root) event id and body text, in a
+    /// fixed default room.
+    ///
+    /// All the other fields are filled with throwaway-but-valid values so the
+    /// tests can focus on body relevance/scoring.
+    fn index_bookmark(index: &mut BookmarkIndex, event_id: &str, body: &str) {
+        index_bookmark_in_room(index, event_id, body, "!room:example.org");
+    }
 
-//     /// Helper function to add a bookmark to the index
-//     fn index_message(
-//         index: &mut BookmarkIndex,
-//         event: AnySyncMessageLikeEvent,
-//     ) -> Result<(), IndexError> {
-//         if let AnySyncMessageLikeEvent::RoomMessage(ev) = event
-//             && let Some(ev) = ev.as_original()
-//             && ev.content.relates_to.is_none()
-//         {
-//             return index.execute(BookmarkIndexOperation::Add(ev.clone()));
-//         }
-//         panic!("Event was not a relationless OriginalSyncRoomMessageEvent.")
-//     }
+    /// Index a bookmark with the given (root) event id, body text and room id.
+    fn index_bookmark_in_room(
+        index: &mut BookmarkIndex,
+        event_id: &str,
+        body: &str,
+        room_id: &str,
+    ) {
+        let original_event_id = ruma::EventId::parse(event_id).unwrap();
+        let pointer_event_id =
+            ruma::EventId::parse(format!("$pointer-for-{}:example.org", &event_id[1..2])).unwrap();
+        let room_id = ruma::RoomId::parse(room_id).unwrap();
 
-//     /// Helper function to remove events to the index
-//     fn index_remove(index: &mut BookmarkIndex, event_id: &EventId) -> Result<(), IndexError> {
-//         index.execute(BookmarkIndexOperation::Remove(event_id.to_owned()))
-//     }
+        let pointer_info = BookmarkPointerInfo {
+            original_event_id: original_event_id.clone(),
+            room_id,
+            pointer_event_id,
+        };
+        let content = BookmarkContent::new(
+            original_event_id,
+            Some(body.to_owned()),
+            MilliSecondsSinceUnixEpoch(uint!(0)),
+            owned_user_id!("@alice:example.org"),
+        );
 
-//     /// Helper function to edit events in index
-//     ///
-//     /// Edit event with `event_id` into new [`OriginalSyncRoomMessageEvent`]
-//     fn index_edit(
-//         index: &mut BookmarkIndex,
-//         event_id: &EventId,
-//         new: OriginalSyncRoomMessageEvent,
-//     ) -> Result<(), IndexError> {
-//         index.execute(BookmarkIndexOperation::Edit(event_id.to_owned(), new))
-//     }
+        let mut writer = index.get_writer().unwrap();
+        index.add(&mut writer, pointer_info, content).unwrap();
+        index.commit_and_reload(&mut writer).unwrap();
+    }
 
-//     #[test]
-//     fn test_add_event() {
-//         let room_id = room_id!("!room_id:localhost");
-//         let mut index = BookmarkIndexBuilder::new_in_memory(room_id).build();
+    /// Searching only returns bookmarks whose body matches the query, and the
+    /// returned scores are strictly positive.
+    #[test]
+    fn test_search_body_only_returns_matching_bookmarks() {
+        let mut index = BookmarkIndexBuilder::new_in_memory().build();
 
-//         let event = EventFactory::new()
-//             .text_msg("event message")
-//             .event_id(event_id!("$event_id:localhost"))
-//             .room(room_id)
-//             .sender(user_id!("@user_id:localhost"))
-//             .into_any_sync_message_like_event();
+        let matching = owned_event_id!("$1-match:example.org");
+        let other = owned_event_id!("$2-other:example.org");
 
-//         index_message(&mut index, event).expect("failed to add event: {res:?}");
-//     }
+        index_bookmark(&mut index, matching.as_str(), "the quick brown fox");
+        index_bookmark(&mut index, other.as_str(), "completely unrelated content");
 
-//     #[test]
-//     fn test_search_populated_index() -> Result<(), Box<dyn Error>> {
-//         let room_id = room_id!("!room_id:localhost");
-//         let mut index = BookmarkIndexBuilder::new_in_memory(room_id).build();
+        let results = index.search("fox", 10, None, None).unwrap();
 
-//         let event_id_1 = event_id!("$event_id_1:localhost");
-//         let event_id_2 = event_id!("$event_id_2:localhost");
-//         let event_id_3 = event_id!("$event_id_3:localhost");
-//         let user_id = user_id!("@user_id:localhost");
-//         let f = EventFactory::new().room(room_id).sender(user_id);
+        assert_eq!(results.len(), 1, "only the matching bookmark should be returned");
+        assert_eq!(results[0].original_event_id, matching);
+        assert!(results[0].score > 0.0, "a matching bookmark must have a positive score");
+    }
 
-//         index_message(
-//             &mut index,
-//             f.text_msg("This is a sentence")
-//                 .event_id(event_id_1)
-//                 .into_any_sync_message_like_event(),
-//         )?;
+    /// A bookmark whose body mentions the query term more often is more relevant
+    /// and must be ranked (scored) higher than one that mentions it only once.
+    #[test]
+    fn test_search_body_term_frequency_affects_score_ordering() {
+        let mut index = BookmarkIndexBuilder::new_in_memory().build();
 
-//         index_message(
-//             &mut index,
-//             f.text_msg("All new words").event_id(event_id_2).into_any_sync_message_like_event(),
-//         )?;
+        let many = owned_event_id!("$1-many:example.org");
+        let few = owned_event_id!("$2-few:example.org");
 
-//         index_message(
-//             &mut index,
-//             f.text_msg("A similar sentence")
-//                 .event_id(event_id_3)
-//                 .into_any_sync_message_like_event(),
-//         )?;
+        index_bookmark(&mut index, many.as_str(), "matrix matrix matrix matrix matrix");
+        index_bookmark(&mut index, few.as_str(), "matrix is a protocol for messaging");
 
-//         let result = index.search("sentence", 10, None).expect("search failed with: {result:?}");
-//         let result: HashSet<_> = result.iter().collect();
+        let results = index.search("matrix", 10, None, None).unwrap();
 
-//         let true_value = [event_id_1.to_owned(), event_id_3.to_owned()];
-//         let true_value: HashSet<_> = true_value.iter().collect();
+        assert_eq!(results.len(), 2, "both bookmarks mention the query term");
 
-//         assert_eq!(result, true_value, "search result not correct: {result:?}");
+        // Results are ordered by descending score.
+        assert_eq!(results[0].original_event_id, many);
+        assert_eq!(results[1].original_event_id, few);
+        assert!(
+            results[0].score > results[1].score,
+            "the body matching the term more often must score higher: {} vs {}",
+            results[0].score,
+            results[1].score,
+        );
+    }
 
-//         Ok(())
-//     }
+    /// A bookmark matching several of the query terms must score higher than one
+    /// matching only a single term.
+    #[test]
+    fn test_search_body_more_matching_terms_scores_higher() {
+        let mut index = BookmarkIndexBuilder::new_in_memory().build();
 
-//     #[test]
-//     fn test_search_empty_index() -> Result<(), Box<dyn Error>> {
-//         let room_id = room_id!("!room_id:localhost");
-//         let index = BookmarkIndexBuilder::new_in_memory(room_id).build();
+        let full = owned_event_id!("$1-full:example.org");
+        let partial = owned_event_id!("$2-part:example.org");
 
-//         let result = index.search("sentence", 10, None).expect("search failed with: {result:?}");
+        index_bookmark(&mut index, full.as_str(), "quick brown fox");
+        index_bookmark(&mut index, partial.as_str(), "quick green turtle");
 
-//         assert!(result.is_empty(), "search result not empty: {result:?}");
+        // An OR query: both bookmarks match "quick", but only one matches
+        // "brown" and "fox" as well.
+        let results = index.search("quick brown fox", 10, None, None).unwrap();
 
-//         Ok(())
-//     }
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].original_event_id, full);
+        assert_eq!(results[1].original_event_id, partial);
+        assert!(
+            results[0].score > results[1].score,
+            "matching more query terms must score higher: {} vs {}",
+            results[0].score,
+            results[1].score,
+        );
 
-//     #[test]
-//     fn test_index_contains_false() {
-//         let room_id = room_id!("!room_id:localhost");
-//         let index = BookmarkIndexBuilder::new_in_memory(room_id).build();
+        println!("SCORE 1: {}", results[0].score);
+        println!("SCORE 2: {}", results[1].score);
+    }
 
-//         let event_id = event_id!("$event_id:localhost");
+    /// A rarer term carries more weight (higher IDF) than a term present in
+    /// every document, so the bookmark matching the rare term ranks first.
+    #[test]
+    fn test_search_body_rare_term_scores_higher() {
+        let mut index = BookmarkIndexBuilder::new_in_memory().build();
 
-//         assert!(!index.contains(event_id), "Index should not contain event");
-//     }
+        let rare = owned_event_id!("$1-rare:example.org");
+        let common_a = owned_event_id!("$2-coma:example.org");
+        let common_b = owned_event_id!("$3-comb:example.org");
 
-//     #[test]
-//     fn test_index_contains_true() -> Result<(), Box<dyn Error>> {
-//         let room_id = room_id!("!room_id:localhost");
-//         let mut index = BookmarkIndexBuilder::new_in_memory(room_id).build();
+        // "common" appears in every document, "unicorn" only in one.
+        index_bookmark(&mut index, rare.as_str(), "common unicorn");
+        index_bookmark(&mut index, common_a.as_str(), "common ordinary thing");
+        index_bookmark(&mut index, common_b.as_str(), "common everyday item");
 
-//         let event_id = event_id!("$event_id:localhost");
-//         let event = EventFactory::new()
-//             .text_msg("This is a sentence")
-//             .event_id(event_id)
-//             .room(room_id)
-//             .sender(user_id!("@user_id:localhost"))
-//             .into_any_sync_message_like_event();
+        let results = index.search("common unicorn", 10, None, None).unwrap();
 
-//         index_message(&mut index, event)?;
+        println!("{results:?}");
+        assert_eq!(results.len(), 3);
+        assert_eq!(
+            results[0].original_event_id, rare,
+            "the bookmark matching the rare term should rank first",
+        );
+        assert!(results[0].score > results[1].score);
+    }
 
-//         assert!(index.contains(event_id), "Index should contain event");
+    /// Searching for a term that no bookmark body contains returns nothing.
+    #[test]
+    fn test_search_body_no_match_returns_empty() {
+        let mut index = BookmarkIndexBuilder::new_in_memory().build();
 
-//         Ok(())
-//     }
+        index_bookmark(&mut index, "$1-a:example.org", "hello world");
+        index_bookmark(&mut index, "$2-b:example.org", "goodbye world");
 
-//     #[test]
-//     fn test_index_add_idempotency() -> Result<(), Box<dyn Error>> {
-//         let room_id = room_id!("!room_id:localhost");
-//         let mut index = BookmarkIndexBuilder::new_in_memory(room_id).build();
+        let results = index.search("nonexistent", 10, None, None).unwrap();
 
-//         let event_id = event_id!("$event_id:localhost");
-//         let event = EventFactory::new()
-//             .text_msg("This is a sentence")
-//             .event_id(event_id)
-//             .room(room_id)
-//             .sender(user_id!("@user_id:localhost"))
-//             .into_any_sync_message_like_event();
+        assert!(results.is_empty(), "no body matches the query: {results:?}");
+    }
 
-//         index_message(&mut index, event.clone())?;
+    /// A room_id filter restricts the results to bookmarks living in that room,
+    /// even when bookmarks in other rooms match the query just as well.
+    #[test]
+    fn test_search_body_room_filter_excludes_other_rooms() {
+        let mut index = BookmarkIndexBuilder::new_in_memory().build();
 
-//         assert!(index.contains(event_id), "Index should contain event");
+        let room_a = ruma::room_id!("!room-a:example.org");
+        let room_b = ruma::room_id!("!room-b:example.org");
 
-//         // indexing again should do nothing
-//         index_message(&mut index, event)?;
+        let in_a = owned_event_id!("$1-a:example.org");
+        let in_b = owned_event_id!("$2-b:example.org");
 
-//         assert!(index.contains(event_id), "Index should still contain event");
+        index_bookmark_in_room(&mut index, in_a.as_str(), "shared matrix term", room_a.as_str());
+        index_bookmark_in_room(&mut index, in_b.as_str(), "shared matrix term", room_b.as_str());
 
-//         let result = index.search("sentence", 10, None).expect("search failed with: {result:?}");
+        // Without a filter, both rooms match.
+        let unfiltered = index.search("matrix", 10, None, None).unwrap();
+        assert_eq!(unfiltered.len(), 2);
 
-//         assert_eq!(result.len(), 1, "Index should have ignored second indexing");
+        // With a filter, only the bookmark in room A is returned.
+        let results = index.search("matrix", 10, None, Some(room_a)).unwrap();
 
-//         Ok(())
-//     }
+        assert_eq!(results.len(), 1, "only the bookmark in the filtered room should be returned");
+        assert_eq!(results[0].original_event_id, in_a);
+        assert_eq!(results[0].room_id, room_a);
+        assert!(results[0].score > 0.0, "a matching bookmark must have a positive score");
+    }
 
-//     #[test]
-//     fn test_remove_event() -> Result<(), Box<dyn Error>> {
-//         let room_id = room_id!("!room_id:localhost");
-//         let mut index = BookmarkIndexBuilder::new_in_memory(room_id).build();
+    /// Within a single filtered room, body relevance still drives the ordering:
+    /// the more relevant bookmark in the room ranks first, and matching
+    /// bookmarks in other rooms do not interfere.
+    #[test]
+    fn test_search_body_relevance_ordering_within_room_filter() {
+        let mut index = BookmarkIndexBuilder::new_in_memory().build();
 
-//         let event_id = event_id!("$event_id:localhost");
-//         let user_id = user_id!("@user_id:localhost");
-//         let f = EventFactory::new().room(room_id).sender(user_id);
+        let room_a = ruma::room_id!("!room-a:example.org");
+        let room_b = ruma::room_id!("!room-b:example.org");
 
-//         let event =
-//             f.text_msg("This is a sentence").event_id(event_id).into_any_sync_message_like_event();
+        let many = owned_event_id!("$1-many:example.org");
+        let few = owned_event_id!("$2-few:example.org");
+        let noise = owned_event_id!("$3-nois:example.org");
 
-//         index_message(&mut index, event)?;
+        // Two matching bookmarks in room A with differing term frequency...
+        index_bookmark_in_room(
+            &mut index,
+            many.as_str(),
+            "matrix matrix matrix matrix",
+            room_a.as_str(),
+        );
+        index_bookmark_in_room(&mut index, few.as_str(), "matrix is a protocol", room_a.as_str());
+        // ...and a strongly-matching bookmark in room B that must be filtered out.
+        index_bookmark_in_room(
+            &mut index,
+            noise.as_str(),
+            "matrix matrix matrix matrix matrix matrix",
+            room_b.as_str(),
+        );
 
-//         assert!(index.contains(event_id), "Index should contain event");
+        let results = index.search("matrix", 10, None, Some(room_a)).unwrap();
 
-//         index_remove(&mut index, event_id)?;
+        assert_eq!(results.len(), 2, "only room A bookmarks should be returned");
+        assert!(results.iter().all(|bookmark| bookmark.room_id == room_a));
 
-//         assert!(!index.contains(event_id), "Index should not contain event");
+        // Relevance ordering is preserved within the filtered room.
+        assert_eq!(results[0].original_event_id, many);
+        assert_eq!(results[1].original_event_id, few);
+        assert!(
+            results[0].score > results[1].score,
+            "the more relevant bookmark in the room must score higher: {} vs {}",
+            results[0].score,
+            results[1].score,
+        );
+    }
 
-//         Ok(())
-//     }
+    /// A room_id filter pointing at a room without any matching bookmark returns
+    /// nothing, even if the query matches bookmarks in other rooms.
+    #[test]
+    fn test_search_body_room_filter_no_match_returns_empty() {
+        let mut index = BookmarkIndexBuilder::new_in_memory().build();
 
-//     #[test]
-//     fn test_edit_removes_old_and_adds_new_event() -> Result<(), Box<dyn Error>> {
-//         let room_id = room_id!("!room_id:localhost");
-//         let mut index = BookmarkIndexBuilder::new_in_memory(room_id).build();
+        let room_a = ruma::room_id!("!room-a:example.org");
+        let room_b = ruma::room_id!("!room-b:example.org");
 
-//         let old_event_id = event_id!("$old_event_id:localhost");
-//         let user_id = user_id!("@user_id:localhost");
-//         let f = EventFactory::new().room(room_id).sender(user_id);
+        index_bookmark_in_room(&mut index, "$1-a:example.org", "matrix term", room_a.as_str());
 
-//         let old_event = f
-//             .text_msg("This is a sentence")
-//             .event_id(old_event_id)
-//             .into_any_sync_message_like_event();
+        // The query matches a bookmark, but not in room B.
+        let results = index.search("matrix", 10, None, Some(room_b)).unwrap();
 
-//         index_message(&mut index, old_event)?;
+        assert!(results.is_empty(), "no bookmark in the filtered room matches: {results:?}");
+    }
 
-//         assert!(index.contains(old_event_id), "Index should contain event");
+    /// Regression test: looking a bookmark up by its (root) event id must
+    /// return the pointer event id, even for event ids that contain characters
+    /// that the tantivy query parser would otherwise treat as syntax.
+    #[test]
+    fn test_get_bookmark_id_for_event_returns_pointer_event_id() {
+        let mut index = BookmarkIndexBuilder::new_in_memory().build();
 
-//         let new_event_id = event_id!("$new_event_id:localhost");
-//         let edit = f
-//             .text_msg("This is a brand new sentence!")
-//             .edit(
-//                 old_event_id,
-//                 RoomMessageEventContentWithoutRelation::text_plain("This is a brand new sentence!"),
-//             )
-//             .event_id(new_event_id)
-//             .into_original_sync_room_message_event();
+        let original_event_id = owned_event_id!("$some-event_id:example.org");
+        let pointer_event_id = owned_event_id!("$bookmark-event_id:example.org");
+        let room_id = owned_room_id!("!room:example.org");
 
-//         index_edit(&mut index, old_event_id, edit)?;
+        let pointer_info = BookmarkPointerInfo {
+            original_event_id: original_event_id.clone(),
+            room_id,
+            pointer_event_id: pointer_event_id.clone(),
+        };
+        let content = BookmarkContent::new(
+            original_event_id.clone(),
+            Some("hello world".to_owned()),
+            MilliSecondsSinceUnixEpoch(uint!(0)),
+            owned_user_id!("@alice:example.org"),
+        );
 
-//         assert!(!index.contains(old_event_id), "Index should not contain old event");
-//         assert!(index.contains(new_event_id), "Index should contain edited event");
+        let mut writer = index.get_writer().unwrap();
+        index.add(&mut writer, pointer_info, content).unwrap();
+        index.commit_and_reload(&mut writer).unwrap();
 
-//         Ok(())
-//     }
-// }
+        assert!(index.contains_bookmark(&original_event_id));
+        assert_eq!(index.get_bookmark_id_for_event(&original_event_id), Some(pointer_event_id));
+
+        // A non-bookmarked event returns nothing.
+        assert!(!index.contains_bookmark(event_id!("$not-bookmarked:example.org")));
+        assert_eq!(index.get_bookmark_id_for_event(event_id!("$not-bookmarked:example.org")), None);
+    }
+}

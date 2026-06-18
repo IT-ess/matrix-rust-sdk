@@ -37,16 +37,6 @@ use tracing::error;
 use crate::{Client, Room, message_search::SearchError, room::futures::SendMessageLikeEventResult};
 
 impl Room {
-    /// Get bookmarked events of this room and return at most
-    /// max_number_of_results results.
-    pub async fn get_room_bookmarks(
-        &self,
-        max_number_of_results: usize,
-        pagination_offset: Option<usize>,
-    ) -> Result<Vec<IndexedBookmark>, IndexError> {
-        self.search_room_bookmarks("*", max_number_of_results, pagination_offset).await
-    }
-
     /// Search the [`BookmarkIndex`]  and return at most
     /// max_number_of_results results.
     pub async fn search_room_bookmarks(
@@ -89,14 +79,10 @@ impl Room {
         const BATCH_SIZE: usize = 100;
 
         let mut event_ids = std::collections::HashSet::new();
-        let mut offset = 0;
 
-        loop {
-            let batch = self.get_room_bookmarks(BATCH_SIZE, Some(offset)).await?;
-            if batch.is_empty() {
-                break;
-            }
-            offset += batch.len();
+        while let Ok(Some(batch)) =
+            self.search_room_bookmarks_iterator("*".to_owned(), BATCH_SIZE).next().await
+        {
             event_ids.extend(batch.into_iter().map(|bookmark| bookmark.original_event_id));
         }
 
