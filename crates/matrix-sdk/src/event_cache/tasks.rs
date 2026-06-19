@@ -506,100 +506,47 @@ pub(super) async fn search_indexing_task(
                 };
                 let redaction_rules = room.clone_info().room_version_rules_or_default().redaction;
 
-                let mut search_index_guard = client.search_index().lock().await;
+                if cfg!(feature = "experimental-bookmarks") {
+                    if let Some(RoomType::Bookmarks) = room.room_type() {
+                        let mut bookmark_index_guard = client.bookmark_index().lock().await;
 
-                if let Err(err) = search_index_guard
-                    .bulk_handle_timeline_event(
-                        timeline_events,
-                        &room_cache,
-                        &room_id,
-                        &redaction_rules,
-                    )
-                    .await
-                {
-                    error!("Failed to handle events for indexing: {err}")
-                }
-            }
-            Err(RecvError::Closed) => {
-                debug!(
-                    "Linked chunk update channel has been closed, exiting thread subscriber task"
-                );
-                break;
-            }
-            Err(RecvError::Lagged(num_skipped)) => {
-                warn!(num_skipped, "Lagged behind linked chunk updates");
-            }
-        }
-    }
-}
+                        if let Err(err) = bookmark_index_guard
+                            .bulk_handle_bookmark_event(timeline_events, &client, &redaction_rules)
+                            .await
+                        {
+                            error!(
+                                "Failed to handle events from the bookmarks room for indexing: {err}"
+                            )
+                        }
+                    } else {
+                        let mut search_index_guard = client.search_index().lock().await;
 
-/// Takes an [`Event`] and passes it to the [`BookmarkIndex`] of the
-/// given room which will add/remove/edit an event in the index based on
-/// the event type.
-///
-/// [`Event`]: matrix_sdk_base::event_cache::Event
-/// [`BookmarkIndex`]: matrix_sdk_search::bookmarks::BookmarkIndex
-#[cfg(feature = "experimental-bookmarks")]
-#[instrument(skip_all)]
-pub(super) async fn bookmark_indexing_task(
-    client: WeakClient,
-    linked_chunk_update_sender: Sender<RoomEventCacheLinkedChunkUpdate>,
-) {
-    let mut linked_chunk_update_receiver = linked_chunk_update_sender.subscribe();
-
-    loop {
-        match linked_chunk_update_receiver.recv().await {
-            Ok(room_ec_lc_update) => {
-                let OwnedLinkedChunkId::Room(room_id) = room_ec_lc_update.linked_chunk_id.clone()
-                else {
-                    trace!("Received non-room updates, ignoring.");
-                    continue;
-                };
-                let Some(client) = client.get() else {
-                    trace!("Client is shutting down, exiting search task");
-                    return;
-                };
-
-                if let Ok(Some(bookmarks_room_id)) = client.account().get_bookmarks_room_id().await
-                {
-                    if !bookmarks_room_id.eq(&room_id) {
-                        trace!("Received non-bookmarks room updates, ignoring.");
-                        continue;
+                        if let Err(err) = search_index_guard
+                            .bulk_handle_timeline_event(
+                                timeline_events,
+                                &room_cache,
+                                &room_id,
+                                &redaction_rules,
+                            )
+                            .await
+                        {
+                            error!("Failed to handle events for indexing: {err}")
+                        }
                     }
                 } else {
-                    trace!("Bookmarks room is not setup yet, ignoring.");
-                    continue;
-                }
+                    let mut search_index_guard = client.search_index().lock().await;
 
-                let mut timeline_events = room_ec_lc_update.events().peekable();
-
-                if timeline_events.peek().is_none() {
-                    continue;
-                }
-
-                let maybe_room = client.get_room(&room_id);
-
-                let Some(room) = maybe_room else {
-                    warn!(get_room = %room_id, "Failed to get room while indexing: {maybe_room:?}");
-                    continue;
-                };
-
-                if let Some(RoomType::Bookmarks) = room.room_type() {
-                    trace!("Check: the room is a bookmarks room.");
-                } else {
-                    trace!("The setup room for bookmarks is not a bookmarks room, ignoring.");
-                    continue;
-                }
-
-                let mut bookmark_index_guard = client.bookmark_index().lock().await;
-
-                let redaction_rules = room.clone_info().room_version_rules_or_default().redaction;
-
-                if let Err(err) = bookmark_index_guard
-                    .bulk_handle_bookmark_event(timeline_events, &client, &redaction_rules)
-                    .await
-                {
-                    error!("Failed to handle events from the bookmarks room for indexing: {err}")
+                    if let Err(err) = search_index_guard
+                        .bulk_handle_timeline_event(
+                            timeline_events,
+                            &room_cache,
+                            &room_id,
+                            &redaction_rules,
+                        )
+                        .await
+                    {
+                        error!("Failed to handle events for indexing: {err}")
+                    }
                 }
             }
             Err(RecvError::Closed) => {
