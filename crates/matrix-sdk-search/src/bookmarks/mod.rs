@@ -20,8 +20,7 @@ mod writer;
 use std::{collections::HashSet, fmt};
 
 use ruma::{
-    EventId, MilliSecondsSinceUnixEpoch, OwnedEventId, OwnedRoomId, OwnedUserId, RoomId, UInt,
-    UserId, events::bookmark::OriginalSyncBookmarkEvent,
+    EventId, OwnedEventId, OwnedRoomId, RoomId, events::bookmark::OriginalSyncBookmarkEvent,
 };
 use tantivy::{
     Index, IndexReader, TantivyDocument, Term,
@@ -200,32 +199,16 @@ impl BookmarkIndex {
                 .and_then(|str| EventId::parse(str).ok())
                 .ok_or(IndexError::IdParsing)?;
 
-            let sender = extract_str(self.schema.sender_key())
-                .and_then(|str| UserId::parse(str).ok())
-                .ok_or(IndexError::IdParsing)?;
-
             let room_id = extract_str(self.schema.room_id_key())
                 .and_then(|str| RoomId::parse(str).ok())
                 .ok_or(IndexError::IdParsing)?;
 
-            let date_value = retrieved_doc
-                .get_first(self.schema.date_key())
-                .and_then(|v| v.as_datetime())
-                .ok_or(IndexError::IdParsing)?;
-
-            let date = MilliSecondsSinceUnixEpoch(UInt::new_saturating(
-                date_value.into_timestamp_millis() as u64,
-            ));
-
             tracing::info!("OUTPUT SCORE: {score}");
 
             ret.push(IndexedBookmark {
-                body: extract_str(self.schema.body_key()).unwrap_or_default().to_owned(),
                 event_id,
                 original_event_id,
                 pointer_event_id,
-                original_server_ts: date,
-                sender,
                 room_id,
                 score,
             });
@@ -518,8 +501,7 @@ impl From<OriginalSyncBookmarkEvent> for BookmarkPointerInfo {
     }
 }
 
-/// Representation of a bookmark as it is stored
-/// in the index.
+/// Representation of the stored fields in the index
 #[derive(Debug, Clone)]
 pub struct IndexedBookmark {
     /// Event id of the current "version" of the bookmarked
@@ -531,13 +513,6 @@ pub struct IndexedBookmark {
     /// Event id of the `m.bookmark` event that points to the
     /// bookmarked event and triggered its indexation.
     pub pointer_event_id: OwnedEventId,
-    /// Body of the bookmarked message. Maybe an empty string if
-    /// the event does not have a string representation.
-    pub body: String,
-    /// When the bookmarked event has been sent
-    pub original_server_ts: MilliSecondsSinceUnixEpoch,
-    /// Sender of the bookmarked event
-    pub sender: OwnedUserId,
     /// Room in which the bookmarked event lives
     pub room_id: OwnedRoomId,
     /// Search score

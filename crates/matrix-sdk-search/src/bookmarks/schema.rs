@@ -29,10 +29,7 @@ pub(crate) trait MatrixBookmarkIndexSchema {
     fn primary_key(&self) -> Field;
     fn deletion_key(&self) -> Field;
     fn pointer_event_id_key(&self) -> Field;
-    fn sender_key(&self) -> Field;
     fn room_id_key(&self) -> Field;
-    fn body_key(&self) -> Field;
-    fn date_key(&self) -> Field;
     fn get_field_name(&self, field: Field) -> &str;
     fn as_tantivy_schema(&self) -> Schema;
     fn make_doc(
@@ -44,7 +41,7 @@ pub(crate) trait MatrixBookmarkIndexSchema {
 
 #[derive(Debug, Clone)]
 /// A struct that represents the fields of the original
-/// event that will be stored in the index.
+/// event that will be indexed.
 pub struct BookmarkContent {
     /// Event_id of the current "version" of the
     /// content of this bookmark. Bookmarks may have
@@ -101,14 +98,13 @@ impl MatrixBookmarkIndexSchema for BookmarkSchema {
         let event_id_field = schema.add_text_field("event_id", STORED | STRING);
         let original_event_id_field = schema.add_text_field("original_event_id", STORED | STRING);
         let pointer_event_id_field = schema.add_text_field("pointer_event_id", STORED | STRING);
-        let body_field = schema.add_text_field("body", STORED | TEXT);
+        let body_field = schema.add_text_field("body", TEXT);
 
-        let date_options = DateOptions::from(STORED | INDEXED)
-            .set_fast()
-            .set_precision(DateTimePrecision::Seconds);
+        let date_options =
+            DateOptions::from(INDEXED).set_fast().set_precision(DateTimePrecision::Seconds);
 
         let date_field = schema.add_date_field("date", date_options);
-        let sender_field = schema.add_text_field("sender", STORED | STRING);
+        let sender_field = schema.add_text_field("sender", STRING);
         let room_id_field = schema.add_text_field("room_id", STORED | STRING);
 
         let default_search_fields = vec![body_field];
@@ -144,20 +140,8 @@ impl MatrixBookmarkIndexSchema for BookmarkSchema {
         self.pointer_event_id_field
     }
 
-    fn body_key(&self) -> Field {
-        self.body_field
-    }
-
-    fn date_key(&self) -> Field {
-        self.date_field
-    }
-
     fn room_id_key(&self) -> Field {
         self.room_id_field
-    }
-
-    fn sender_key(&self) -> Field {
-        self.sender_field
     }
 
     fn get_field_name(&self, field: Field) -> &str {
