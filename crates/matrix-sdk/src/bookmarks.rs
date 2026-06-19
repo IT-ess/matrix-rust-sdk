@@ -79,10 +79,14 @@ impl Room {
         const BATCH_SIZE: usize = 100;
 
         let mut event_ids = std::collections::HashSet::new();
+        let mut offset = 0;
 
-        while let Ok(Some(batch)) =
-            self.search_room_bookmarks_iterator("*".to_owned(), BATCH_SIZE).next().await
-        {
+        loop {
+            let batch = self.search_room_bookmarks("*", BATCH_SIZE, Some(offset)).await?;
+            if batch.is_empty() {
+                break;
+            }
+            offset += batch.len();
             event_ids.extend(batch.into_iter().map(|bookmark| bookmark.original_event_id));
         }
 

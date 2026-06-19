@@ -1354,6 +1354,11 @@ impl TimelineController {
     /// Should be called only once after creation of the [`TimelineController`],
     /// with all its fields set.
     pub(super) async fn init_focus(&self) -> Result<InitFocusResult, Error> {
+        // load the bookmarks list of this room before loading the events so
+        // they're marked as bookmarked.
+        #[cfg(feature = "experimental-bookmarks")]
+        self.load_bookmarked_events().await;
+
         match self.focus.deref() {
             TimelineFocusKind::Live { event_cache, .. } => {
                 // Retrieve the cached events, and add them to the timeline.
@@ -1476,6 +1481,11 @@ impl TimelineController {
         &self,
         event_cache: &ThreadEventCache,
     ) -> Result<(bool, broadcast::Receiver<TimelineVectorDiffs>), Error> {
+        // load the bookmarks list of this room before loading the events so
+        // they're marked as bookmarked.
+        #[cfg(feature = "experimental-bookmarks")]
+        self.load_bookmarked_events().await;
+
         let (events, receiver) = event_cache.subscribe().await?;
         let has_events = !events.is_empty();
 
@@ -1595,6 +1605,7 @@ impl TimelineController {
     ///
     /// This is used to efficiently flag message-like timeline items as
     /// bookmarked, without querying the bookmark index per item.
+    #[cfg(feature = "experimental-bookmarks")]
     pub(super) async fn load_bookmarked_events(&self) {
         let bookmarked_events = self.room_data_provider.load_bookmarked_events().await;
         self.state.write().await.meta.bookmarked_events = bookmarked_events;

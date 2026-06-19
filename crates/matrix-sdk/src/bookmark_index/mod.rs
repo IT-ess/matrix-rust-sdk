@@ -273,7 +273,7 @@ async fn handle_sync_bookmark(
     match bookmark_event {
         SyncBookmarkEvent::Original(bookmark) => {
             if let Ok((cache, _)) =
-                client.event_cache().for_room(&bookmark.content.pointer.room_id).await
+                client.event_cache().room(&bookmark.content.pointer.room_id).await
                 && let Some(content) = get_most_recent_edit(
                     &cache,
                     &bookmark.content.pointer.event_id,

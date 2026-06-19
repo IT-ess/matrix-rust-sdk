@@ -773,7 +773,7 @@ impl EventCacheInner {
                         "we must have called `EventCache::subscribe()` before calling here.",
                     ),
                     &self.state,
-                    self.automatic_pagination.get().cloned(),
+                    self.automatic_pagination_for_room(room_id),
                 )
                 .await?;
 
