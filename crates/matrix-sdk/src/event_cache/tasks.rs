@@ -555,6 +555,21 @@ pub(super) async fn bookmark_indexing_task(
                     trace!("Received non-room updates, ignoring.");
                     continue;
                 };
+                let Some(client) = client.get() else {
+                    trace!("Client is shutting down, exiting search task");
+                    return;
+                };
+
+                if let Ok(Some(bookmarks_room_id)) = client.account().get_bookmarks_room_id().await
+                {
+                    if !bookmarks_room_id.eq(&room_id) {
+                        trace!("Received non-bookmarks room updates, ignoring.");
+                        continue;
+                    }
+                } else {
+                    trace!("Bookmarks room is not setup yet, ignoring.");
+                    continue;
+                }
 
                 let mut timeline_events = room_ec_lc_update.events().peekable();
 
@@ -562,10 +577,6 @@ pub(super) async fn bookmark_indexing_task(
                     continue;
                 }
 
-                let Some(client) = client.get() else {
-                    trace!("Client is shutting down, exiting search task");
-                    return;
-                };
                 let maybe_room = client.get_room(&room_id);
 
                 let Some(room) = maybe_room else {
@@ -573,40 +584,22 @@ pub(super) async fn bookmark_indexing_task(
                     continue;
                 };
 
+                if let Some(RoomType::Bookmarks) = room.room_type() {
+                    trace!("Check: the room is a bookmarks room.");
+                } else {
+                    trace!("The setup room for bookmarks is not a bookmarks room, ignoring.");
+                    continue;
+                }
+
                 let mut bookmark_index_guard = client.bookmark_index().lock().await;
 
                 let redaction_rules = room.clone_info().room_version_rules_or_default().redaction;
 
-                if let Some(room_type) = room.room_type() {
-                    match room_type {
-                        RoomType::Bookmarks => {
-                            if let Err(err) = bookmark_index_guard
-                                .bulk_handle_bookmark_event(
-                                    timeline_events,
-                                    &client,
-                                    &redaction_rules,
-                                )
-                                .await
-                            {
-                                error!(
-                                    "Failed to handle events from the bookmarks room for indexing: {err}"
-                                )
-                            }
-                        }
-                        _ => continue, // We don't handle other room types
-                    }
-                } else {
-                    let maybe_room_cache = client.event_cache().for_room(&room_id).await;
-                    let Ok((room_cache, _drop_handles)) = maybe_room_cache else {
-                        warn!(for_room = %room_id, "Failed to get RoomEventCache: {maybe_room_cache:?}");
-                        continue;
-                    };
-                    if let Err(err) = bookmark_index_guard
-                        .bulk_handle_timeline_event(timeline_events, &room_cache, &redaction_rules)
-                        .await
-                    {
-                        error!("Failed to handle events for the bookmark indexing task: {err}")
-                    }
+                if let Err(err) = bookmark_index_guard
+                    .bulk_handle_bookmark_event(timeline_events, &client, &redaction_rules)
+                    .await
+                {
+                    error!("Failed to handle events from the bookmarks room for indexing: {err}")
                 }
             }
             Err(RecvError::Closed) => {
