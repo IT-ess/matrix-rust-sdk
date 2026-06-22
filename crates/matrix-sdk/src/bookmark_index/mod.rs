@@ -23,18 +23,18 @@ use futures_util::future::join_all;
 use matrix_sdk_base::deserialized_responses::TimelineEvent;
 use matrix_sdk_search::{
     bookmarks::{
-        BookmarkContent, BookmarkIndex, BookmarkIndexOperation, IndexedBookmark,
+        BookmarkIndex, BookmarkIndexOperation, BookmarkPointerInfo, IndexedBookmark,
         builder::BookmarkIndexBuilder,
     },
     error::IndexError,
 };
 use ruma::{
-    EventId, OwnedEventId, RoomId,
+    EventId, RoomId,
     events::{
-        AnySyncMessageLikeEvent,
-        bookmark::SyncBookmarkEvent,
+        AnySyncMessageLikeEvent, AnySyncTimelineEvent,
+        bookmark::{OriginalSyncBookmarkEvent, SyncBookmarkEvent},
         room::{
-            message::{MessageType, OriginalSyncRoomMessageEvent},
+            message::{OriginalSyncRoomMessageEvent, Relation},
             redaction::SyncRoomRedactionEvent,
         },
     },
@@ -152,29 +152,29 @@ impl BookmarkIndexGuard<'_> {
         pagination_offset: Option<usize>,
         room_id_filter: Option<&RoomId>,
     ) -> Result<Vec<IndexedBookmark>, IndexError> {
-        let res = self.get_or_create_index()?.search(
+        self.get_or_create_index()?.search(
             query,
             max_number_of_results,
             pagination_offset,
             room_id_filter,
-        )?;
-        tracing::warn!("SEARCH RES : {res:?}");
-        Ok(res)
+        )
     }
 
     /// Check if the bookmark index contains an event and return its
-    /// bookmark_event_id if its the case.
+    /// bookmark original_event_id if its the case.
+    /// The checked event_id should be the root/original one if
+    /// the event has `m.replace` relation(s).
     /// Never fails, and creates the index in memory if
     /// it hasn't been created before.
     pub(crate) fn get_bookmark_id_for_event(
         &self,
-        original_event_id: &EventId,
-    ) -> Option<OwnedEventId> {
+        original_target_event_id: &EventId,
+    ) -> Option<BookmarkPointerInfo> {
         if let Some(index) = self.index.as_ref() {
-            index.get_bookmark_id_for_event(original_event_id)
+            index.get_pointer_info_from_target_event(original_target_event_id)
         } else {
             match self.create_index() {
-                Ok(index) => index.get_bookmark_id_for_event(original_event_id),
+                Ok(index) => index.get_pointer_info_from_target_event(original_target_event_id),
                 Err(err) => {
                     warn!(
                         "Failed to open the bookmark index, assuming there is no bookmark for that event: {err}"
@@ -194,11 +194,12 @@ impl BookmarkIndexGuard<'_> {
     pub async fn handle_bookmark_event(
         &mut self,
         client: &Client,
+        room_cache: &RoomEventCache,
         event: TimelineEvent,
         redaction_rules: &RedactionRules,
     ) -> Result<(), IndexError> {
         if let Some(index_operation) =
-            parse_bookmarks_room_event(client, event, redaction_rules).await
+            parse_bookmarks_room_event(client, room_cache, event, redaction_rules).await
         {
             self.execute(index_operation)
         } else {
@@ -212,12 +213,14 @@ impl BookmarkIndexGuard<'_> {
         &mut self,
         events: T,
         client: &Client,
+        room_cache: &RoomEventCache,
         redaction_rules: &RedactionRules,
     ) -> Result<(), IndexError>
     where
         T: Iterator<Item = TimelineEvent>,
     {
-        let futures = events.map(|ev| parse_bookmarks_room_event(client, ev, redaction_rules));
+        let futures =
+            events.map(|ev| parse_bookmarks_room_event(client, room_cache, ev, redaction_rules));
 
         let operations: Vec<_> = join_all(futures).await.into_iter().flatten().collect();
 
@@ -229,19 +232,20 @@ impl BookmarkIndexGuard<'_> {
 /// or the event itself if there are no edits.
 /// If a Client is provided, this function will try to fetch the event if it
 /// hasn't been found.
-async fn get_most_recent_edit(
-    cache: &RoomEventCache,
+async fn get_most_recent_timeline_event_edit(
+    target_room_cache: &RoomEventCache,
     original: &EventId,
-    client: Option<(&Client, &RoomId)>,
+    client: &Client,
+    target_room_id: &RoomId,
 ) -> Option<OriginalSyncRoomMessageEvent> {
     use ruma::events::{AnySyncTimelineEvent, relation::RelationType};
 
-    let (original_ev, related) = if let Ok(Some((original_ev, related))) =
-        cache.find_event_with_relations(original, Some(vec![RelationType::Replacement])).await
+    let (original_ev, related) = if let Ok(Some((original_ev, related))) = target_room_cache
+        .find_event_with_relations(original, Some(vec![RelationType::Replacement]))
+        .await
     {
         (original_ev, related)
-    } else if let Some((client, room_id)) = client
-        && let Some(room) = client.get_room(room_id)
+    } else if let Some(room) = client.get_room(target_room_id)
         && let Ok((original_ev, related)) = room
             .load_or_fetch_event_with_relations(
                 original,
@@ -272,68 +276,85 @@ async fn handle_sync_bookmark(
 ) -> Option<BookmarkIndexOperation> {
     match bookmark_event {
         SyncBookmarkEvent::Original(bookmark) => {
-            if let Ok((cache, _)) =
-                client.event_cache().room(&bookmark.content.pointer.room_id).await
-                && let Some(content) = get_most_recent_edit(
-                    &cache,
-                    &bookmark.content.pointer.event_id,
-                    Some((client, &bookmark.content.pointer.room_id)),
-                )
-                .await
-            {
-                Some(BookmarkIndexOperation::Add(
-                    bookmark.to_owned(),
-                    convert_room_message_into_bookmark_content(content),
-                ))
+            if let Some(op) = handle_possible_edit(&bookmark, client).await {
+                Some(op)
             } else {
-                warn!("Couldn't find pointed event for bookmark.");
-                None
+                if let Ok((cache, _)) =
+                    client.event_cache().room(&bookmark.content.pointer.room_id).await
+                    && let Some(content) = get_most_recent_timeline_event_edit(
+                        &cache,
+                        &bookmark.content.pointer.event_id,
+                        client,
+                        &bookmark.content.pointer.room_id,
+                    )
+                    .await
+                {
+                    Some(BookmarkIndexOperation::Add(Box::new(bookmark.to_owned()), content.into()))
+                } else {
+                    warn!("Couldn't get event cache for targeted room_id.");
+                    None
+                }
             }
         }
         SyncBookmarkEvent::Redacted(redacted) => {
-            Some(BookmarkIndexOperation::RemoveWithBookmarkId(redacted.event_id))
+            Some(BookmarkIndexOperation::Remove(redacted.event_id))
         }
     }
 }
 
-fn convert_room_message_into_bookmark_content(
-    message: OriginalSyncRoomMessageEvent,
-) -> BookmarkContent {
-    let body = match &message.content.msgtype {
-        MessageType::Text(content) => Some(content.body.clone()),
-        MessageType::Notice(content) => Some(content.body.clone()),
-        MessageType::Emote(content) => Some(content.body.clone()),
-        MessageType::Audio(content) if let Some(caption) = content.caption() => {
-            Some(caption.to_owned())
+/// If the given [`OriginalSyncBookmarkEvent`] is an edit we make an
+/// [`BookmarkIndexOperation::Edit`] with the new most recent version of the
+/// original.
+async fn handle_possible_edit(
+    event: &OriginalSyncBookmarkEvent,
+    client: &Client,
+) -> Option<BookmarkIndexOperation> {
+    if let Some(Relation::Replacement(replacement_data)) = &event.content.relates_to {
+        if let Ok((cache, _)) =
+            client.event_cache().room(&replacement_data.new_content.pointer.room_id).await
+            && let Some(recent) = get_most_recent_timeline_event_edit(
+                &cache,
+                &replacement_data.event_id,
+                client,
+                &replacement_data.new_content.pointer.room_id,
+            )
+            .await
+        {
+            return Some(BookmarkIndexOperation::Edit(event.clone().into(), recent.into()));
+        } else {
+            return Some(BookmarkIndexOperation::Noop);
         }
-        MessageType::File(content) if let Some(caption) = content.caption() => {
-            Some(caption.to_owned())
-        }
-        MessageType::Image(content) if let Some(caption) = content.caption() => {
-            Some(caption.to_owned())
-        }
-        MessageType::Video(content) if let Some(caption) = content.caption() => {
-            Some(caption.to_owned())
-        }
-        _ => None,
-    };
-
-    BookmarkContent::new(message.event_id, body, message.origin_server_ts, message.sender)
+    }
+    None
 }
 
 /// Return a [`BookmarkIndexOperation::Remove`] or nothing
 /// depending on the message.
-fn handle_bookmark_redaction(
+async fn handle_bookmark_redaction(
     event: SyncRoomRedactionEvent,
+    cache: &RoomEventCache,
     rules: &RedactionRules,
+    client: &Client,
 ) -> Option<BookmarkIndexOperation> {
-    event.redacts(rules).map(|id| BookmarkIndexOperation::RemoveWithBookmarkId(id.to_owned()))
+    if let Some(redacted_event_id) = event.redacts(rules)
+        && let Ok(Some(redacted_event)) = cache.find_event(redacted_event_id).await
+        && let Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::Bookmark(
+            redacted_event,
+        ))) = redacted_event.raw().deserialize()
+        && let SyncBookmarkEvent::Original(redacted_event) = redacted_event
+    {
+        return handle_possible_edit(&redacted_event, client)
+            .await
+            .or(Some(BookmarkIndexOperation::Remove(redacted_event.event_id)));
+    }
+    None
 }
 
 /// Prepare a [`TimelineEvent`] of the `m.bookmarks` room into a
 /// [`BookmarkIndexOperation`] for bookmark indexing.
 async fn parse_bookmarks_room_event(
     client: &Client,
+    bookmarks_room_cache: &RoomEventCache,
     event: TimelineEvent,
     redaction_rules: &RedactionRules,
 ) -> Option<BookmarkIndexOperation> {
@@ -350,7 +371,8 @@ async fn parse_bookmarks_room_event(
                     handle_sync_bookmark(event, client).await
                 }
                 AnySyncMessageLikeEvent::RoomRedaction(event) => {
-                    handle_bookmark_redaction(event, redaction_rules)
+                    handle_bookmark_redaction(event, bookmarks_room_cache, redaction_rules, client)
+                        .await
                 }
                 _ => None,
             },
@@ -454,7 +476,7 @@ mod tests {
             .sync_room(
                 &client,
                 JoinedRoomBuilder::new(bookmarks_room_id)
-                    .add_state_event(f.create(user_id, RoomVersionId::V11).with_bookmarks_type())
+                    .add_state_event(f.create(user_id, RoomVersionId::V12).with_bookmarks_type())
                     .add_timeline_event(bookmark),
             )
             .await;
@@ -467,7 +489,7 @@ mod tests {
             "bookmarked event id doesn't match: {response:?}"
         );
         assert_eq!(
-            response[0].pointer_event_id, bookmark_event_id,
+            response[0].target_event_id, bookmark_event_id,
             "bookmark pointer event id doesn't match: {response:?}"
         );
     }
@@ -544,7 +566,7 @@ mod tests {
             .sync_room(
                 &client,
                 JoinedRoomBuilder::new(bookmarks_room_id)
-                    .add_state_event(f.create(user_id, RoomVersionId::V11).with_bookmarks_type())
+                    .add_state_event(f.create(user_id, RoomVersionId::V12).with_bookmarks_type())
                     .add_timeline_event(bookmark),
             )
             .await;

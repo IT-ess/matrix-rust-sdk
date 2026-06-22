@@ -233,8 +233,15 @@ impl Client {
     /// Checks whether an event is bookmarked or not from its original
     /// event_id and returns its associated bookmark_event_id if its
     /// the case.
-    pub async fn is_event_bookmarked(&self, original_event_id: &EventId) -> Option<OwnedEventId> {
-        self.bookmark_index().lock().await.get_bookmark_id_for_event(original_event_id)
+    pub async fn is_event_bookmarked(
+        &self,
+        original_target_event_id: &EventId,
+    ) -> Option<OwnedEventId> {
+        self.bookmark_index()
+            .lock()
+            .await
+            .get_bookmark_id_for_event(original_target_event_id)
+            .map(|b| b.bookmark_id())
     }
 }
 

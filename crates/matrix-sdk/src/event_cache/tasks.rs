@@ -511,7 +511,12 @@ pub(super) async fn search_indexing_task(
                         let mut bookmark_index_guard = client.bookmark_index().lock().await;
 
                         if let Err(err) = bookmark_index_guard
-                            .bulk_handle_bookmark_event(timeline_events, &client, &redaction_rules)
+                            .bulk_handle_bookmark_event(
+                                timeline_events,
+                                &client,
+                                &room_cache,
+                                &redaction_rules,
+                            )
                             .await
                         {
                             error!(

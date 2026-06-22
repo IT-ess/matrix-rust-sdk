@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use ruma::{MilliSecondsSinceUnixEpoch, OwnedEventId, OwnedUserId};
+use ruma::{
+    MilliSecondsSinceUnixEpoch, OwnedUserId,
+    events::room::message::{MessageType, OriginalSyncRoomMessageEvent},
+};
 use tantivy::{
     DateTime, TantivyDocument, doc,
     schema::{DateOptions, DateTimePrecision, Field, INDEXED, STORED, STRING, Schema, TEXT},
@@ -28,26 +31,21 @@ pub(crate) trait MatrixBookmarkIndexSchema {
     fn default_search_fields(&self) -> Vec<Field>;
     fn primary_key(&self) -> Field;
     fn deletion_key(&self) -> Field;
-    fn pointer_event_id_key(&self) -> Field;
-    fn room_id_key(&self) -> Field;
+    fn target_event_id_key(&self) -> Field;
+    fn target_room_id_key(&self) -> Field;
     fn get_field_name(&self, field: Field) -> &str;
     fn as_tantivy_schema(&self) -> Schema;
     fn make_doc(
         &self,
         pointer_info: BookmarkPointerInfo,
-        bookmark_content: BookmarkContent,
+        bookmark_content: IndexedBookmarkContent,
     ) -> Result<TantivyDocument, IndexError>;
 }
 
 #[derive(Debug, Clone)]
 /// A struct that represents the fields of the original
 /// event that will be indexed.
-pub struct BookmarkContent {
-    /// Event_id of the current "version" of the
-    /// content of this bookmark. Bookmarks may have
-    /// different versions when `m.replace` relations
-    /// exist on the bookmarked message.
-    pub(super) event_id: OwnedEventId,
+pub struct IndexedBookmarkContent {
     /// Plain text content of the bookmarked event.
     /// The content of this field will be indexed.
     /// It may be None if the bookmarked event does
@@ -61,34 +59,58 @@ pub struct BookmarkContent {
     pub(super) sender: OwnedUserId,
 }
 
-impl BookmarkContent {
-    /// Create a new BookmarkContent
+impl IndexedBookmarkContent {
+    /// Create a new IndexedBookmarkContent
     pub fn new(
-        event_id: OwnedEventId,
         body: Option<String>,
         date: MilliSecondsSinceUnixEpoch,
         sender: OwnedUserId,
     ) -> Self {
-        Self { event_id, body, date, sender }
+        Self { body, date, sender }
+    }
+}
+
+impl From<OriginalSyncRoomMessageEvent> for IndexedBookmarkContent {
+    fn from(value: OriginalSyncRoomMessageEvent) -> Self {
+        let body = match value.content.msgtype {
+            MessageType::Text(content) => Some(content.body),
+            MessageType::Notice(content) => Some(content.body),
+            MessageType::Emote(content) => Some(content.body),
+            MessageType::Audio(ref content) if let Some(caption) = content.caption() => {
+                Some(caption.to_owned())
+            }
+            MessageType::File(ref content) if let Some(caption) = content.caption() => {
+                Some(caption.to_owned())
+            }
+            MessageType::Image(ref content) if let Some(caption) = content.caption() => {
+                Some(caption.to_owned())
+            }
+            MessageType::Video(ref content) if let Some(caption) = content.caption() => {
+                Some(caption.to_owned())
+            }
+            _ => None,
+        };
+
+        Self { body, date: value.origin_server_ts, sender: value.sender }
     }
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct BookmarkSchema {
     inner: Schema,
-    /// The event id of the current version of the bookmarked
-    /// message. (primary key).
+    /// The event id of this bookmark event (primary key).
     event_id_field: Field,
-    /// The event id of the original version of the bookmarked message.
+    /// The event id of the original version of the bookmark.
     /// Used by edits to refer to the event they edited (deletion key).
     original_event_id_field: Field,
-    /// The event id of the bookmark "pointer" event.
-    /// It is also used as a key.
-    pointer_event_id_field: Field,
+    /// The event_id this bookmark references.
+    /// It is also used as a key for editions and redactions.
+    target_event_id_field: Field,
+    /// The room_id in which the referenced event is.
+    target_room_id_field: Field,
     body_field: Field,
     date_field: Field,
     sender_field: Field,
-    room_id_field: Field,
     default_search_fields: Vec<Field>,
 }
 
@@ -97,7 +119,8 @@ impl MatrixBookmarkIndexSchema for BookmarkSchema {
         let mut schema = Schema::builder();
         let event_id_field = schema.add_text_field("event_id", STORED | STRING);
         let original_event_id_field = schema.add_text_field("original_event_id", STORED | STRING);
-        let pointer_event_id_field = schema.add_text_field("pointer_event_id", STORED | STRING);
+        let target_event_id_field = schema.add_text_field("target_event_id", STORED | STRING);
+        let target_room_id_field = schema.add_text_field("target_room_id", STORED | STRING);
         let body_field = schema.add_text_field("body", TEXT);
 
         let date_options =
@@ -105,7 +128,6 @@ impl MatrixBookmarkIndexSchema for BookmarkSchema {
 
         let date_field = schema.add_date_field("date", date_options);
         let sender_field = schema.add_text_field("sender", STRING);
-        let room_id_field = schema.add_text_field("room_id", STORED | STRING);
 
         let default_search_fields = vec![body_field];
 
@@ -115,11 +137,11 @@ impl MatrixBookmarkIndexSchema for BookmarkSchema {
             inner: schema,
             event_id_field,
             original_event_id_field,
-            pointer_event_id_field,
+            target_event_id_field,
+            target_room_id_field,
             body_field,
             date_field,
             sender_field,
-            room_id_field,
             default_search_fields,
         }
     }
@@ -136,12 +158,12 @@ impl MatrixBookmarkIndexSchema for BookmarkSchema {
         self.original_event_id_field
     }
 
-    fn pointer_event_id_key(&self) -> Field {
-        self.pointer_event_id_field
+    fn target_event_id_key(&self) -> Field {
+        self.target_event_id_field
     }
 
-    fn room_id_key(&self) -> Field {
-        self.room_id_field
+    fn target_room_id_key(&self) -> Field {
+        self.target_room_id_field
     }
 
     fn get_field_name(&self, field: Field) -> &str {
@@ -152,23 +174,23 @@ impl MatrixBookmarkIndexSchema for BookmarkSchema {
         self.inner.clone()
     }
 
-    /// Given a [`BookmarkPointerInfo`] and a [`BookmarkContent`]
+    /// Given a [`BookmarkPointerInfo`] and a [`IndexedBookmarkContent`]
     /// return a [`TantivyDocument`].
     fn make_doc(
         &self,
         pointer_info: BookmarkPointerInfo,
-        bookmark_content: BookmarkContent,
+        bookmark_content: IndexedBookmarkContent,
     ) -> Result<TantivyDocument, IndexError> {
         let document = doc!(
+            self.event_id_field => pointer_info.event_id.to_string(),
+            self.original_event_id_field => pointer_info.original_event_id.to_string(),
+            self.target_event_id_field => pointer_info.target_event_id.to_string(),
+            self.target_room_id_field => pointer_info.target_room_id.to_string(),
             self.body_field => bookmark_content.body.unwrap_or("".to_owned()),
             self.date_field =>
                 DateTime::from_timestamp_millis(
                     bookmark_content.date.get().into()),
             self.sender_field => bookmark_content.sender.to_string(),
-            self.event_id_field => bookmark_content.event_id.to_string(),
-            self.original_event_id_field => pointer_info.original_event_id.to_string(),
-            self.pointer_event_id_field => pointer_info.pointer_event_id.to_string(),
-            self.room_id_field => pointer_info.room_id.to_string(),
         );
 
         Ok(document)
@@ -181,11 +203,11 @@ impl TryFrom<Schema> for BookmarkSchema {
     fn try_from(schema: Schema) -> Result<BookmarkSchema, Self::Error> {
         let event_id_field = schema.get_field("event_id")?;
         let original_event_id_field = schema.get_field("original_event_id")?;
-        let pointer_event_id_field = schema.get_field("pointer_event_id")?;
+        let target_event_id_field = schema.get_field("target_event_id")?;
+        let target_room_id_field = schema.get_field("target_room_id")?;
         let body_field = schema.get_field("body")?;
         let date_field = schema.get_field("date")?;
         let sender_field = schema.get_field("sender")?;
-        let room_id_field = schema.get_field("room_id")?;
 
         let default_search_fields = vec![body_field];
 
@@ -193,11 +215,11 @@ impl TryFrom<Schema> for BookmarkSchema {
             inner: schema,
             event_id_field,
             original_event_id_field,
-            pointer_event_id_field,
+            target_event_id_field,
             body_field,
             date_field,
             sender_field,
-            room_id_field,
+            target_room_id_field,
             default_search_fields,
         })
     }

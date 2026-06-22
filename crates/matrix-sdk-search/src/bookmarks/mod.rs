@@ -20,7 +20,8 @@ mod writer;
 use std::{collections::HashSet, fmt};
 
 use ruma::{
-    EventId, OwnedEventId, OwnedRoomId, RoomId, events::bookmark::OriginalSyncBookmarkEvent,
+    EventId, OwnedEventId, OwnedRoomId, RoomId,
+    events::{bookmark::OriginalSyncBookmarkEvent, room::message::Relation},
 };
 use tantivy::{
     Index, IndexReader, TantivyDocument, Term,
@@ -37,26 +38,26 @@ use crate::{
         schema::{BookmarkSchema, MatrixBookmarkIndexSchema},
         writer::BookmarkIndexWriter,
     },
-    error::{BookmarkIndexError, IndexError},
+    error::IndexError,
 };
 
-pub use crate::bookmarks::schema::BookmarkContent;
+pub use crate::bookmarks::schema::IndexedBookmarkContent;
 
 /// A struct to represent the operations on a [`BookmarkIndex`]
 #[derive(Debug, Clone)]
 pub enum BookmarkIndexOperation {
     /// Add this bookmark to the index.
-    Add(OriginalSyncBookmarkEvent, BookmarkContent),
+    Add(Box<OriginalSyncBookmarkEvent>, IndexedBookmarkContent),
     /// Remove all documents in the index where
     /// `MatrixBookmarkIndexSchema::deletion_key()` matches this event id.
     Remove(OwnedEventId),
     /// Remove all documents in the index where
-    /// `MatrixBookmarkIndexSchema::pointer_event_id_key()` matches this event id.
-    RemoveWithBookmarkId(OwnedEventId),
+    /// `MatrixBookmarkIndexSchema::target_event_id_key()` matches this event id.
+    RemoveWithTargetEventId(OwnedEventId),
     /// Replace all documents in the index where
-    /// `MatrixBookmarkIndexSchema::deletion_key()` matches this event id with
-    /// the new event.
-    Edit(OwnedEventId, BookmarkContent),
+    /// `MatrixBookmarkIndexSchema::deletion_key()` matches this original_event id
+    /// of the BookmarkPointerInfo
+    Edit(BookmarkPointerInfo, IndexedBookmarkContent),
     /// Do nothing.
     Noop,
 }
@@ -152,10 +153,10 @@ impl BookmarkIndex {
         let base_query = self.query_parser.parse_query(query)?;
 
         let full_query = if let Some(room_id) = room_id_filter {
-            let room_term = Term::from_field_text(self.schema.room_id_key(), room_id.as_str());
-            let room_filter_query =
-                Box::new(TermQuery::new(room_term, IndexRecordOption::WithFreqs));
-            BooleanQuery::new(vec![(Occur::Must, base_query), (Occur::Must, room_filter_query)])
+            let room_term =
+                Term::from_field_text(self.schema.target_room_id_key(), room_id.as_str());
+            let room_filter_query = Box::new(TermQuery::new(room_term, IndexRecordOption::Basic));
+            BooleanQuery::new(vec![(Occur::Should, base_query), (Occur::Must, room_filter_query)])
         } else {
             BooleanQuery::new(vec![(Occur::Should, base_query)])
         };
@@ -195,21 +196,19 @@ impl BookmarkIndex {
                 .and_then(|str| EventId::parse(str).ok())
                 .ok_or(IndexError::IdParsing)?;
 
-            let pointer_event_id = extract_str(self.schema.pointer_event_id_key())
+            let target_event_id = extract_str(self.schema.target_event_id_key())
                 .and_then(|str| EventId::parse(str).ok())
                 .ok_or(IndexError::IdParsing)?;
 
-            let room_id = extract_str(self.schema.room_id_key())
+            let target_room_id = extract_str(self.schema.target_room_id_key())
                 .and_then(|str| RoomId::parse(str).ok())
                 .ok_or(IndexError::IdParsing)?;
-
-            tracing::info!("OUTPUT SCORE: {score}");
 
             ret.push(IndexedBookmark {
                 event_id,
                 original_event_id,
-                pointer_event_id,
-                room_id,
+                target_event_id,
+                target_room_id,
                 score,
             });
         }
@@ -219,10 +218,6 @@ impl BookmarkIndex {
 
     /// Find all indexed bookmarks for which the given text `field` exactly
     /// matches `event_id`.
-    ///
-    /// This uses an exact [`TermQuery`] rather than the [`QueryParser`], because
-    /// event ids contain characters (e.g. `$`, `:`, `-`) that the query parser
-    /// interprets as syntax, which would prevent any match.
     fn find_by_event_id_field(
         &self,
         field: Field,
@@ -235,7 +230,7 @@ impl BookmarkIndex {
     }
 
     /// Find all indexed bookmarks whose deletion key (the original/root event
-    /// id of the bookmarked message) matches the given event id.
+    /// id of the bookmark event) matches the given event id.
     fn find_by_original_event_id(
         &self,
         original_event_id: &EventId,
@@ -259,9 +254,9 @@ impl BookmarkIndex {
         &mut self,
         writer: &mut BookmarkIndexWriter,
         pointer_info: BookmarkPointerInfo,
-        bookmark_content: BookmarkContent,
+        bookmark_content: IndexedBookmarkContent,
     ) -> Result<(), IndexError> {
-        let current_version_event_id = bookmark_content.event_id.clone();
+        let current_version_event_id = pointer_info.event_id.clone();
         if !self.contains(&current_version_event_id) {
             writer.add(self.schema.make_doc(pointer_info, bookmark_content)?)?;
         }
@@ -273,29 +268,18 @@ impl BookmarkIndex {
     fn remove(
         &mut self,
         writer: &mut BookmarkIndexWriter,
-        original_event_id: OwnedEventId,
-    ) -> Result<BookmarkPointerInfo, IndexError> {
-        let events = self.get_events_to_be_removed(&original_event_id)?;
+        original_event_id: &EventId,
+    ) -> Result<(), IndexError> {
+        let events = self.get_events_to_be_removed(original_event_id)?;
 
-        writer.remove(&original_event_id);
-
-        // When we edit an event, we remove the previous one(s) and then recreate
-        // it. We need to pass some info from the previously saved bookmark for this
-        // to work. This info will be used only if this is an edition.
-        let Some(pointer_info) = events.first().map(|bookmark| BookmarkPointerInfo {
-            original_event_id,
-            room_id: bookmark.room_id.clone(),
-            pointer_event_id: bookmark.pointer_event_id.clone(),
-        }) else {
-            return Err(IndexError::BookmarkIndexError(BookmarkIndexError::MissingData));
-        };
+        writer.remove(original_event_id);
 
         for event in events.into_iter() {
             self.uncommitted_adds.remove(&event.event_id);
             self.uncommitted_removes.insert(event.event_id);
         }
 
-        Ok(pointer_info)
+        Ok(())
     }
 
     fn execute_impl(
@@ -303,25 +287,24 @@ impl BookmarkIndex {
         writer: &mut BookmarkIndexWriter,
         operation: &BookmarkIndexOperation,
     ) -> Result<(), IndexError> {
-        debug!("INDEX: executing {operation:?}");
         match operation.clone() {
             BookmarkIndexOperation::Add(pointer_event, bookmark_content) => {
-                self.add(writer, pointer_event.into(), bookmark_content)?;
+                self.add(writer, (*pointer_event).into(), bookmark_content)?;
             }
             BookmarkIndexOperation::Remove(event_id) => {
-                self.remove(writer, event_id)?;
+                self.remove(writer, &event_id)?;
             }
-            BookmarkIndexOperation::RemoveWithBookmarkId(event_id) => {
+            BookmarkIndexOperation::RemoveWithTargetEventId(event_id) => {
                 if let Some(original_event_id) =
-                    self.get_original_event_id_from_bookmark_id(&event_id)
+                    self.get_original_event_id_from_target_id(&event_id)
                 {
-                    self.remove(writer, original_event_id)?;
+                    self.remove(writer, &original_event_id)?;
                 } else {
-                    warn!("Couldn't find pointed event for redacted bookmark.")
+                    warn!("Couldn't find bookmark for given target_event_id {event_id}.")
                 }
             }
-            BookmarkIndexOperation::Edit(original_event_id, bookmark_content) => {
-                let pointer_info = self.remove(writer, original_event_id)?;
+            BookmarkIndexOperation::Edit(pointer_info, bookmark_content) => {
+                self.remove(writer, &pointer_info.original_event_id)?;
                 self.add(writer, pointer_info, bookmark_content)?;
             }
             BookmarkIndexOperation::Noop => {}
@@ -429,10 +412,10 @@ impl BookmarkIndex {
         }
     }
 
-    /// Check the presence of a record with its deletion key (the original version of the bookmarked
-    /// message)
-    pub fn contains_bookmark(&self, original_event_id: &EventId) -> bool {
-        match self.find_by_original_event_id(original_event_id, 1) {
+    #[cfg(test)]
+    /// Check the presence of a record with its target_event_id key
+    fn contains_bookmark(&self, target_event_id: &EventId) -> bool {
+        match self.find_by_event_id_field(self.schema.target_event_id_key(), target_event_id, 100) {
             Ok(results) => !results.is_empty(),
             Err(err) => {
                 warn!("Failed to check if event has been indexed, assuming it wasn't: {err}");
@@ -441,11 +424,14 @@ impl BookmarkIndex {
         }
     }
 
-    /// Check from an original_event_id if there is a bookmark, and return
-    /// its pointer_event_id if its the case.
-    pub fn get_bookmark_id_for_event(&self, original_event_id: &EventId) -> Option<OwnedEventId> {
-        match self.find_by_original_event_id(original_event_id, 1) {
-            Ok(results) => results.into_iter().next().map(|bookmark| bookmark.pointer_event_id),
+    /// Check from a target_event_id if there is a bookmark, and return
+    /// its [`BookmarkPointerInfo`] if its the case.
+    pub fn get_pointer_info_from_target_event(
+        &self,
+        target_event_id: &EventId,
+    ) -> Option<BookmarkPointerInfo> {
+        match self.find_by_event_id_field(self.schema.target_event_id_key(), target_event_id, 100) {
+            Ok(results) => results.into_iter().next().map(Into::into),
             Err(err) => {
                 warn!("Failed to check if event has been indexed, assuming it wasn't: {err}");
                 None
@@ -455,14 +441,14 @@ impl BookmarkIndex {
 
     /// Check from an original_event_id if there is a bookmark, and return
     /// its pointer_event_id if its the case.
-    pub fn get_original_event_id_from_bookmark_id(
+    pub fn get_original_event_id_from_target_id(
         &self,
-        pointer_event_id: &EventId,
+        target_event_id: &EventId,
     ) -> Option<OwnedEventId> {
         let search_result = self.search(
             format!(
-                "{}:\"{pointer_event_id}\"",
-                self.schema.get_field_name(self.schema.pointer_event_id_key())
+                "{}:\"{target_event_id}\"",
+                self.schema.get_field_name(self.schema.target_event_id_key())
             )
             .as_str(),
             1,
@@ -480,43 +466,71 @@ impl BookmarkIndex {
 }
 
 /// Necessary information to identify a unique bookmark.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct BookmarkPointerInfo {
-    /// The event_id of the root event of the bookmarked
-    /// event
-    pub(super) original_event_id: OwnedEventId,
-    /// The room_id of the bookmarked event
-    pub(super) room_id: OwnedRoomId,
     /// The event_id of the [`OriginalSyncBookmarkEvent`]
-    pub(super) pointer_event_id: OwnedEventId,
+    pub(super) event_id: OwnedEventId,
+    /// The event_id of the [`OriginalSyncBookmarkEvent`] or
+    /// the event it replaces if its the case.
+    pub(super) original_event_id: OwnedEventId,
+    /// The room_id of the bookmarked event.
+    pub(super) target_room_id: OwnedRoomId,
+    /// The event_id of the bookmarked event.
+    pub(super) target_event_id: OwnedEventId,
 }
 
 impl From<OriginalSyncBookmarkEvent> for BookmarkPointerInfo {
     fn from(value: OriginalSyncBookmarkEvent) -> Self {
-        Self {
-            original_event_id: value.content.pointer.event_id,
-            room_id: value.content.pointer.room_id,
-            pointer_event_id: value.event_id,
+        if let Some(Relation::Replacement(replacement_data)) = value.content.relates_to {
+            Self {
+                event_id: value.event_id,
+                original_event_id: replacement_data.event_id,
+                target_event_id: replacement_data.new_content.pointer.event_id,
+                target_room_id: replacement_data.new_content.pointer.room_id,
+            }
+        } else {
+            Self {
+                event_id: value.event_id.clone(),
+                original_event_id: value.event_id,
+                target_event_id: value.content.pointer.event_id,
+                target_room_id: value.content.pointer.room_id,
+            }
         }
+    }
+}
+
+impl BookmarkPointerInfo {
+    /// Get the bookmark_id of this bookmark (corresponds to original_event_id)
+    pub fn bookmark_id(self) -> OwnedEventId {
+        self.original_event_id
     }
 }
 
 /// Representation of the stored fields in the index
 #[derive(Debug, Clone)]
 pub struct IndexedBookmark {
-    /// Event id of the current "version" of the bookmarked
-    /// message (latest event of the `m.replace` relation chain)
+    /// Event id of the current "version" of the bookmark event
     pub event_id: OwnedEventId,
-    /// "Root" event id of the bookmarked message (first event of
+    /// "Root" event id of the bookmark event (first event of
     /// the `m.replace` relation chain)
     pub original_event_id: OwnedEventId,
-    /// Event id of the `m.bookmark` event that points to the
-    /// bookmarked event and triggered its indexation.
-    pub pointer_event_id: OwnedEventId,
+    /// Event id of the event targeted by this bookmark
+    pub target_event_id: OwnedEventId,
     /// Room in which the bookmarked event lives
-    pub room_id: OwnedRoomId,
+    pub target_room_id: OwnedRoomId,
     /// Search score
     pub score: f32,
+}
+
+impl From<IndexedBookmark> for BookmarkPointerInfo {
+    fn from(value: IndexedBookmark) -> Self {
+        Self {
+            event_id: value.event_id,
+            original_event_id: value.original_event_id,
+            target_room_id: value.target_room_id,
+            target_event_id: value.target_event_id,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -525,7 +539,7 @@ mod tests {
         MilliSecondsSinceUnixEpoch, event_id, owned_event_id, owned_room_id, owned_user_id, uint,
     };
 
-    use super::{BookmarkContent, BookmarkIndex, BookmarkPointerInfo};
+    use super::{BookmarkIndex, BookmarkPointerInfo, IndexedBookmarkContent};
     use crate::bookmarks::builder::BookmarkIndexBuilder;
 
     /// Index a bookmark with the given (root) event id and body text, in a
@@ -550,12 +564,12 @@ mod tests {
         let room_id = ruma::RoomId::parse(room_id).unwrap();
 
         let pointer_info = BookmarkPointerInfo {
-            original_event_id: original_event_id.clone(),
-            room_id,
-            pointer_event_id,
-        };
-        let content = BookmarkContent::new(
+            event_id: original_event_id.clone(),
             original_event_id,
+            target_room_id: room_id,
+            target_event_id: pointer_event_id,
+        };
+        let content = IndexedBookmarkContent::new(
             Some(body.to_owned()),
             MilliSecondsSinceUnixEpoch(uint!(0)),
             owned_user_id!("@alice:example.org"),
@@ -705,7 +719,7 @@ mod tests {
 
         assert_eq!(results.len(), 1, "only the bookmark in the filtered room should be returned");
         assert_eq!(results[0].original_event_id, in_a);
-        assert_eq!(results[0].room_id, room_a);
+        assert_eq!(results[0].target_room_id, room_a);
         assert!(results[0].score > 0.0, "a matching bookmark must have a positive score");
     }
 
@@ -742,7 +756,7 @@ mod tests {
         let results = index.search("matrix", 10, None, Some(room_a)).unwrap();
 
         assert_eq!(results.len(), 2, "only room A bookmarks should be returned");
-        assert!(results.iter().all(|bookmark| bookmark.room_id == room_a));
+        assert!(results.iter().all(|bookmark| bookmark.target_room_id == room_a));
 
         // Relevance ordering is preserved within the filtered room.
         assert_eq!(results[0].original_event_id, many);
@@ -772,24 +786,24 @@ mod tests {
         assert!(results.is_empty(), "no bookmark in the filtered room matches: {results:?}");
     }
 
-    /// Regression test: looking a bookmark up by its (root) event id must
-    /// return the pointer event id, even for event ids that contain characters
-    /// that the tantivy query parser would otherwise treat as syntax.
+    /// Regression test: looking a bookmark up by its (root) target event id must
+    /// return the original event id of the bookmark event, even for event ids that
+    /// contain characters that the tantivy query parser would otherwise treat as syntax.
     #[test]
-    fn test_get_bookmark_id_for_event_returns_pointer_event_id() {
+    fn test_get_original_event_id_from_target_event_returns_original_event_id() {
         let mut index = BookmarkIndexBuilder::new_in_memory().build();
 
-        let original_event_id = owned_event_id!("$some-event_id:example.org");
-        let pointer_event_id = owned_event_id!("$bookmark-event_id:example.org");
+        let original_event_id = owned_event_id!("$bookmark-event_id:example.org");
+        let target_event_id = owned_event_id!("$some-event_id:example.org");
         let room_id = owned_room_id!("!room:example.org");
 
         let pointer_info = BookmarkPointerInfo {
+            event_id: original_event_id.clone(),
             original_event_id: original_event_id.clone(),
-            room_id,
-            pointer_event_id: pointer_event_id.clone(),
+            target_room_id: room_id,
+            target_event_id: target_event_id.clone(),
         };
-        let content = BookmarkContent::new(
-            original_event_id.clone(),
+        let content = IndexedBookmarkContent::new(
             Some("hello world".to_owned()),
             MilliSecondsSinceUnixEpoch(uint!(0)),
             owned_user_id!("@alice:example.org"),
@@ -799,11 +813,17 @@ mod tests {
         index.add(&mut writer, pointer_info, content).unwrap();
         index.commit_and_reload(&mut writer).unwrap();
 
-        assert!(index.contains_bookmark(&original_event_id));
-        assert_eq!(index.get_bookmark_id_for_event(&original_event_id), Some(pointer_event_id));
+        assert!(index.contains_bookmark(&target_event_id));
+        assert_eq!(
+            index.get_pointer_info_from_target_event(&target_event_id).map(|o| o.original_event_id),
+            Some(original_event_id)
+        );
 
         // A non-bookmarked event returns nothing.
         assert!(!index.contains_bookmark(event_id!("$not-bookmarked:example.org")));
-        assert_eq!(index.get_bookmark_id_for_event(event_id!("$not-bookmarked:example.org")), None);
+        assert_eq!(
+            index.get_pointer_info_from_target_event(event_id!("$not-bookmarked:example.org")),
+            None
+        );
     }
 }
