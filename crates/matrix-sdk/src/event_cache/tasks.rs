@@ -22,7 +22,7 @@ use matrix_sdk_base::{
     linked_chunk::OwnedLinkedChunkId, serde_helpers::extract_thread_root_from_content,
     sync::RoomUpdates,
 };
-use ruma::{OwnedEventId, OwnedTransactionId, room::RoomType};
+use ruma::{OwnedEventId, OwnedTransactionId};
 use tokio::{
     select,
     sync::{
@@ -38,7 +38,6 @@ use super::{
 };
 use crate::{
     client::WeakClient,
-    event_cache::AutomaticPagination,
     send_queue::{LocalEchoContent, RoomSendQueueUpdate, SendQueueUpdate},
 };
 
@@ -506,7 +505,10 @@ pub(super) async fn search_indexing_task(
                 };
                 let redaction_rules = room.clone_info().room_version_rules_or_default().redaction;
 
-                if cfg!(feature = "experimental-bookmarks") {
+                #[cfg(feature = "experimental-bookmarks")]
+                {
+                    use ruma::room::RoomType;
+
                     if let Some(RoomType::Bookmarks) = room.room_type() {
                         let mut bookmark_index_guard = client.bookmark_index().lock().await;
 
@@ -532,15 +534,20 @@ pub(super) async fn search_indexing_task(
                                 &room_cache,
                                 &room_id,
                                 &redaction_rules,
+                                &client,
                             )
                             .await
                         {
                             error!("Failed to handle events for indexing: {err}")
                         }
                     }
-                } else {
+                }
+
+                #[cfg(not(feature = "experimental-bookmarks"))]
+                {
                     let mut search_index_guard = client.search_index().lock().await;
 
+                    #[cfg(not(feature = "experimental-bookmarks"))]
                     if let Err(err) = search_index_guard
                         .bulk_handle_timeline_event(
                             timeline_events,
@@ -566,6 +573,9 @@ pub(super) async fn search_indexing_task(
         }
     }
 }
+
+#[cfg(feature = "experimental-bookmarks")]
+use crate::event_cache::AutomaticPagination;
 
 /// Retrieves the active bookmarks room id and trigger an
 /// automatic back-pagination request if it exists.

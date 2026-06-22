@@ -180,10 +180,22 @@ impl SearchIndexGuard<'_> {
         room_cache: &RoomEventCache,
         room_id: &RoomId,
         redaction_rules: &RedactionRules,
+        #[cfg(feature = "experimental-bookmarks")] client: &crate::Client,
     ) -> Result<(), IndexError> {
         if let Some(index_operation) =
             parse_timeline_event(room_cache, event, redaction_rules).await
         {
+            #[cfg(feature = "experimental-bookmarks")]
+            {
+                use matrix_sdk_search::bookmarks::derive_bookmark_operation_from_regular_index_operation;
+
+                if let Some(bookmark_op) =
+                    derive_bookmark_operation_from_regular_index_operation(&index_operation)
+                {
+                    let mut bookmark_index_guard = client.bookmark_index().lock().await;
+                    bookmark_index_guard.execute(bookmark_op)?;
+                }
+            }
             self.execute(index_operation, room_id)
         } else {
             Ok(())
@@ -198,6 +210,7 @@ impl SearchIndexGuard<'_> {
         room_cache: &RoomEventCache,
         room_id: &RoomId,
         redaction_rules: &RedactionRules,
+        #[cfg(feature = "experimental-bookmarks")] client: &crate::Client,
     ) -> Result<(), IndexError>
     where
         T: Iterator<Item = TimelineEvent>,
@@ -205,6 +218,22 @@ impl SearchIndexGuard<'_> {
         let futures = events.map(|ev| parse_timeline_event(room_cache, ev, redaction_rules));
 
         let operations: Vec<_> = join_all(futures).await.into_iter().flatten().collect();
+
+        #[cfg(feature = "experimental-bookmarks")]
+        {
+            use matrix_sdk_search::bookmarks::{
+                BookmarkIndexOperation, derive_bookmark_operation_from_regular_index_operation,
+            };
+
+            let bookmark_operations: Vec<BookmarkIndexOperation> = operations
+                .iter()
+                .filter_map(derive_bookmark_operation_from_regular_index_operation)
+                .collect();
+            if !bookmark_operations.is_empty() {
+                let mut bookmark_index_guard = client.bookmark_index().lock().await;
+                bookmark_index_guard.bulk_execute(bookmark_operations)?;
+            }
+        }
 
         self.bulk_execute(operations, room_id)
     }

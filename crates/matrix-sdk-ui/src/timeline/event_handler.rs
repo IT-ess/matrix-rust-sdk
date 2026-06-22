@@ -954,23 +954,23 @@ impl<'a, 'o> TimelineEventHandler<'a, 'o> {
         content: TimelineItemContent,
         recycled_timeline_id: Option<TimelineUniqueId>,
     ) {
-        // Flag message-like items that point to a currently-bookmarked event.
-        // This is an O(1) lookup against the cached set, so it stays cheap even
-        // when building many items.
-        let is_bookmarked = matches!(
-            &self.ctx.flow,
-            Flow::Remote { event_id, .. }
-                if self.meta.bookmarked_events.contains(&**event_id)
-        );
-        let content = if is_bookmarked {
-            match content {
-                TimelineItemContent::MsgLike(msglike) => {
-                    TimelineItemContent::MsgLike(msglike.with_bookmarked(true))
+        #[cfg(feature = "experimental-bookmarks")]
+        let content = {
+            let is_bookmarked = matches!(
+                &self.ctx.flow,
+                Flow::Remote { event_id, .. }
+                    if self.meta.bookmarked_events.contains(&**event_id)
+            );
+            if is_bookmarked {
+                match content {
+                    TimelineItemContent::MsgLike(msglike) => {
+                        TimelineItemContent::MsgLike(msglike.with_bookmarked(true))
+                    }
+                    other => other,
                 }
-                other => other,
+            } else {
+                content
             }
-        } else {
-            content
         };
 
         let sender = self.ctx.sender.to_owned();

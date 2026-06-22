@@ -33,7 +33,6 @@ pub(crate) trait MatrixBookmarkIndexSchema {
     fn deletion_key(&self) -> Field;
     fn target_event_id_key(&self) -> Field;
     fn target_room_id_key(&self) -> Field;
-    fn get_field_name(&self, field: Field) -> &str;
     fn as_tantivy_schema(&self) -> Schema;
     fn make_doc(
         &self,
@@ -164,10 +163,6 @@ impl MatrixBookmarkIndexSchema for BookmarkSchema {
 
     fn target_room_id_key(&self) -> Field {
         self.target_room_id_field
-    }
-
-    fn get_field_name(&self, field: Field) -> &str {
-        self.inner.get_field_name(field)
     }
 
     fn as_tantivy_schema(&self) -> Schema {

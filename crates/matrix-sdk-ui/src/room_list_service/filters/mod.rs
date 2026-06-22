@@ -83,7 +83,6 @@ mod unread;
 pub use self::{
     all::new_filter as new_filter_all,
     any::new_filter as new_filter_any,
-    bookmarks::new_filter as new_filter_bookmarks,
     category::{RoomCategory, new_filter as new_filter_category},
     deduplicate_versions::new_filter as new_filter_deduplicate_versions,
     favourite::new_filter as new_filter_favourite,
@@ -99,6 +98,9 @@ pub use self::{
     space::new_filter as new_filter_space,
     unread::new_filter as new_filter_unread,
 };
+
+#[cfg(feature = "experimental-bookmarks")]
+pub use self::bookmarks::new_filter as new_filter_bookmarks;
 
 /// A trait “alias” that represents a _filter_.
 ///

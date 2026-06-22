@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{collections::HashSet, future::Future};
+use std::future::Future;
 
 use eyeball::Subscriber;
 use indexmap::IndexMap;
@@ -38,6 +38,9 @@ use crate::timeline::{
     self, Timeline, TimelineReadReceiptTracking, latest_event::LatestEventValue,
     thread_list_service::ThreadListService,
 };
+
+#[cfg(feature = "experimental-bookmarks")]
+use std::collections::HashSet;
 
 pub trait RoomExt {
     /// Get a [`Timeline`] for this room.
@@ -156,6 +159,7 @@ pub(super) trait RoomDataProvider:
     /// This is used to efficiently flag bookmarked timeline items: the set is
     /// loaded once and then consulted with O(1) lookups while building items.
     /// Defaults to an empty set.
+    #[cfg(feature = "experimental-bookmarks")]
     fn load_bookmarked_events(
         &self,
     ) -> impl Future<Output = HashSet<OwnedEventId>> + SendOutsideWasm + '_ {

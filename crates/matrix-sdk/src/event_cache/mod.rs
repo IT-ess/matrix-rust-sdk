@@ -369,14 +369,13 @@ impl EventCache {
                 trace!("spawning the automatic paginations API");
                 let _auto_pagination_handle = self.inner.automatic_pagination.get_or_init(|| AutomaticPagination::new(Arc::downgrade(&self.inner), task_monitor));
 
-                if cfg!(feature = "experimental-bookmarks") {
-                    client.task_monitor().spawn_finite_task(
-                        "event_cache::bookmarks_room_crawl",
-                        tasks::bookmarks_room_crawl_task(
-                            self.inner.client.clone(),
-                            _auto_pagination_handle.clone())
-                    );
-                }
+                #[cfg(feature = "experimental-bookmarks")]
+                client.task_monitor().spawn_finite_task(
+                    "event_cache::bookmarks_room_crawl",
+                    tasks::bookmarks_room_crawl_task(
+                        self.inner.client.clone(),
+                        _auto_pagination_handle.clone())
+                );
             } else {
                 trace!("automatic paginations API is disabled");
             }

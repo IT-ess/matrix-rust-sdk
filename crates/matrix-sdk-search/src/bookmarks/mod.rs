@@ -30,7 +30,7 @@ use tantivy::{
     query::{BooleanQuery, Occur, Query, QueryParser, TermQuery},
     schema::{Field, IndexRecordOption, Value},
 };
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::{
     OpStamp, TANTIVY_INDEX_MEMORY_BUDGET,
@@ -39,6 +39,7 @@ use crate::{
         writer::BookmarkIndexWriter,
     },
     error::IndexError,
+    index::RoomIndexOperation,
 };
 
 pub use crate::bookmarks::schema::IndexedBookmarkContent;
@@ -58,6 +59,9 @@ pub enum BookmarkIndexOperation {
     /// `MatrixBookmarkIndexSchema::deletion_key()` matches this original_event id
     /// of the BookmarkPointerInfo
     Edit(BookmarkPointerInfo, IndexedBookmarkContent),
+    /// Replace all documents in the index where
+    /// `MatrixBookmarkIndexSchema::target_event_id_key()` matches this event_id
+    EditWithTargetEventId(OwnedEventId, IndexedBookmarkContent),
     /// Do nothing.
     Noop,
 }
@@ -294,18 +298,32 @@ impl BookmarkIndex {
             BookmarkIndexOperation::Remove(event_id) => {
                 self.remove(writer, &event_id)?;
             }
-            BookmarkIndexOperation::RemoveWithTargetEventId(event_id) => {
-                if let Some(original_event_id) =
-                    self.get_original_event_id_from_target_id(&event_id)
+            BookmarkIndexOperation::RemoveWithTargetEventId(target_event_id) => {
+                if let Some(pointer_info) =
+                    self.get_pointer_info_from_target_event(&target_event_id)
                 {
-                    self.remove(writer, &original_event_id)?;
+                    self.remove(writer, &pointer_info.original_event_id)?;
                 } else {
-                    warn!("Couldn't find bookmark for given target_event_id {event_id}.")
+                    info!(
+                        "There was no bookmark to remove for given target_event_id {target_event_id}."
+                    )
                 }
             }
             BookmarkIndexOperation::Edit(pointer_info, bookmark_content) => {
                 self.remove(writer, &pointer_info.original_event_id)?;
                 self.add(writer, pointer_info, bookmark_content)?;
+            }
+            BookmarkIndexOperation::EditWithTargetEventId(target_event_id, bookmark_content) => {
+                if let Some(pointer_info) =
+                    self.get_pointer_info_from_target_event(&target_event_id)
+                {
+                    self.remove(writer, &pointer_info.original_event_id)?;
+                    self.add(writer, pointer_info, bookmark_content)?;
+                } else {
+                    info!(
+                        "There was no bookmark to edit for given target_event_id {target_event_id}."
+                    )
+                }
             }
             BookmarkIndexOperation::Noop => {}
         }
@@ -438,31 +456,6 @@ impl BookmarkIndex {
             }
         }
     }
-
-    /// Check from an original_event_id if there is a bookmark, and return
-    /// its pointer_event_id if its the case.
-    pub fn get_original_event_id_from_target_id(
-        &self,
-        target_event_id: &EventId,
-    ) -> Option<OwnedEventId> {
-        let search_result = self.search(
-            format!(
-                "{}:\"{target_event_id}\"",
-                self.schema.get_field_name(self.schema.target_event_id_key())
-            )
-            .as_str(),
-            1,
-            None,
-            None,
-        );
-        match search_result {
-            Ok(results) => results.into_iter().next().map(|bookmark| bookmark.original_event_id),
-            Err(err) => {
-                warn!("Failed to check if event has been indexed, assuming it wasn't: {err}");
-                None
-            }
-        }
-    }
 }
 
 /// Necessary information to identify a unique bookmark.
@@ -530,6 +523,26 @@ impl From<IndexedBookmark> for BookmarkPointerInfo {
             target_room_id: value.target_room_id,
             target_event_id: value.target_event_id,
         }
+    }
+}
+
+/// Returns a [`BookmarkIndexOperation`] if an event has been edited
+/// or removed in a room. A check will be done by the bookmark index
+/// and eventually apply operations to the index.
+pub fn derive_bookmark_operation_from_regular_index_operation(
+    operation: &RoomIndexOperation,
+) -> Option<BookmarkIndexOperation> {
+    match operation {
+        RoomIndexOperation::Edit(event_id, new_content) => {
+            Some(BookmarkIndexOperation::EditWithTargetEventId(
+                event_id.clone(),
+                new_content.to_owned().into(),
+            ))
+        }
+        RoomIndexOperation::Remove(event_id) => {
+            Some(BookmarkIndexOperation::RemoveWithTargetEventId(event_id.clone()))
+        }
+        _ => None,
     }
 }
 

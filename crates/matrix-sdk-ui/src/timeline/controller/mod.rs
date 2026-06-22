@@ -1615,6 +1615,7 @@ impl TimelineController {
     ///
     /// This updates the cached set (so future items get the right flag) and the
     /// corresponding timeline item, if it's currently in the timeline.
+    #[cfg(feature = "experimental-bookmarks")]
     pub(super) async fn set_event_bookmarked(&self, event_id: &EventId, bookmarked: bool) {
         let mut state = self.state.write().await;
 

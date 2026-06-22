@@ -485,7 +485,7 @@ impl ClientInner {
             server_max_upload_size: Mutex::new(OnceCell::new()),
             #[cfg(feature = "experimental-search")]
             search_index: search_index_handler,
-            #[cfg(feature = "experimental-search")]
+            #[cfg(feature = "experimental-bookmarks")]
             bookmark_index: bookmark_index_handler,
             thread_subscription_catchup,
             task_monitor: TaskMonitor::new(),
