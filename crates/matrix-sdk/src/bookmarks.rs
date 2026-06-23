@@ -87,7 +87,7 @@ impl Room {
                 break;
             }
             offset += batch.len();
-            event_ids.extend(batch.into_iter().map(|bookmark| bookmark.original_event_id));
+            event_ids.extend(batch.into_iter().map(|bookmark| bookmark.target_event_id));
         }
 
         Ok(event_ids)
@@ -163,7 +163,7 @@ impl BookmarkSearchIterator {
         };
         let mut results = Vec::new();
         for bookmark in indexed_bookmarks {
-            results.push(self.room.load_or_fetch_event(&bookmark.event_id, None).await?);
+            results.push(self.room.load_or_fetch_event(&bookmark.target_event_id, None).await?);
         }
         Ok(Some(results))
     }

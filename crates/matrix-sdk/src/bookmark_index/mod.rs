@@ -408,16 +408,18 @@ mod tests {
     async fn wait_for_bookmark(
         room: &Room,
         query: &str,
-        expected_event_id: &EventId,
+        expected_target_event_id: &EventId,
     ) -> Vec<IndexedBookmark> {
         for _ in 0..100 {
             let results = room.search_room_bookmarks(query, 5, None).await.unwrap();
-            if results.iter().any(|bookmark| bookmark.event_id == expected_event_id) {
+            if results.iter().any(|bookmark| bookmark.target_event_id == expected_target_event_id) {
                 return results;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        panic!("timed out waiting for the bookmark of {expected_event_id} to be indexed");
+        panic!(
+            "timed out waiting for the bookmark of {expected_target_event_id} to be indexed"
+        );
     }
 
     /// Like [`wait_for_bookmark`], but waits until at least `count` bookmarks
@@ -485,12 +487,16 @@ mod tests {
 
         assert_eq!(response.len(), 1, "unexpected numbers of responses: {response:?}");
         assert_eq!(
-            response[0].original_event_id, event_id,
-            "bookmarked event id doesn't match: {response:?}"
+            response[0].target_event_id, event_id,
+            "bookmarked (target) event id doesn't match: {response:?}"
         );
         assert_eq!(
-            response[0].target_event_id, bookmark_event_id,
+            response[0].event_id, bookmark_event_id,
             "bookmark pointer event id doesn't match: {response:?}"
+        );
+        assert_eq!(
+            response[0].original_event_id, bookmark_event_id,
+            "bookmark root event id doesn't match: {response:?}"
         );
     }
 
@@ -571,37 +577,56 @@ mod tests {
             )
             .await;
 
-        let results = wait_for_bookmark(&room, "message", edit2_id).await;
+        // A single bookmark is indexed, pointing at the original (root) message and
+        // keeping the bookmark event id as its own identity.
+        let results = wait_for_bookmark(&room, "message", original_id).await;
 
         assert_eq!(results.len(), 1, "Search should return 1 result, got {results:?}");
         assert_eq!(
-            results[0].event_id, edit2_id,
-            "Search should return latest edit, got {:?}",
+            results[0].target_event_id, original_id,
+            "Bookmark should point at the original (root) event id, got {:?}",
             results[0]
         );
         assert_eq!(
-            results[0].original_event_id, original_id,
-            "Search should keep the original event id, got {:?}",
+            results[0].event_id, bookmark_event_id,
+            "Bookmark should keep the bookmark event id, got {:?}",
             results[0]
+        );
+
+        // The indexed body is the latest edit (edit2: "An even newer message"), not
+        // the original message ("This is a message"): searching for a term unique to
+        // the latest edit matches, while a term unique to the original does not.
+        wait_for_bookmark(&room, "newer", original_id).await;
+        let by_original = room.search_room_bookmarks("this", 3, None).await.unwrap();
+        assert!(
+            by_original.is_empty(),
+            "The original message body should no longer be indexed, got {by_original:?}"
         );
 
         // Editing the original after it has been bookmarked should delete the previous
-        // edits and index this one.
+        // edit and index this one instead.
         server.sync_room(&client, JoinedRoomBuilder::new(room_id).add_timeline_event(edit3)).await;
 
-        let results = wait_for_bookmark(&room, "message", edit3_id).await;
+        // The body is now the newest edit ("The newest message")...
+        let results = wait_for_bookmark(&room, "newest", original_id).await;
 
         assert_eq!(results.len(), 1, "Search should return 1 result, got {results:?}");
         assert_eq!(
-            results[0].event_id, edit3_id,
-            "Search should return latest edit, got {:?}",
+            results[0].target_event_id, original_id,
+            "Bookmark should still point at the original (root) event id, got {:?}",
             results[0]
         );
-        assert_eq!(
-            results[0].original_event_id, original_id,
-            "Search should keep the original event id, got {:?}",
-            results[0]
-        );
+
+        // ...and the previous edit's body has been replaced, not duplicated.
+        for _ in 0..100 {
+            let stale = room.search_room_bookmarks("newer", 3, None).await.unwrap();
+            let current = room.search_room_bookmarks("message", 3, None).await.unwrap();
+            if stale.is_empty() && current.len() == 1 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("the previous edit was not replaced by the newest one");
     }
 
     #[async_test]
@@ -676,11 +701,11 @@ mod tests {
         assert_eq!(results.len(), 2, "Search should return 2 results, got {results:?}");
         // The message mentioning "matrix" more often must rank first.
         assert_eq!(
-            results[0].event_id, high_id,
+            results[0].target_event_id, high_id,
             "Most relevant bookmark should rank first, got {results:?}"
         );
         assert_eq!(
-            results[1].event_id, low_id,
+            results[1].target_event_id, low_id,
             "Least relevant bookmark should rank last, got {results:?}"
         );
         assert!(

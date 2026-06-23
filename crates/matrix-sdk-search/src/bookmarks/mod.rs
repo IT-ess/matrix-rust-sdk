@@ -27,7 +27,7 @@ use tantivy::{
     Index, IndexReader, TantivyDocument, Term,
     collector::TopDocs,
     directory::error::OpenDirectoryError,
-    query::{BooleanQuery, Occur, Query, QueryParser, TermQuery},
+    query::{AllQuery, BooleanQuery, Occur, Query, QueryParser, TermQuery},
     schema::{Field, IndexRecordOption, Value},
 };
 use tracing::{debug, info, warn};
@@ -154,18 +154,36 @@ impl BookmarkIndex {
         pagination_offset: Option<usize>,
         room_id_filter: Option<&RoomId>,
     ) -> Result<Vec<IndexedBookmark>, IndexError> {
-        let base_query = self.query_parser.parse_query(query)?;
-
-        let full_query = if let Some(room_id) = room_id_filter {
-            let room_term =
-                Term::from_field_text(self.schema.target_room_id_key(), room_id.as_str());
-            let room_filter_query = Box::new(TermQuery::new(room_term, IndexRecordOption::Basic));
-            BooleanQuery::new(vec![(Occur::Should, base_query), (Occur::Must, room_filter_query)])
+        // A `*` (or empty) query matches every bookmark; otherwise the body must
+        // match the query. Note that the body query must be `Must` (required), not
+        // `Should`: a `Should` clause is optional as soon as another clause (such as
+        // the room filter below) is `Must`, which would make every bookmark in the
+        // room match regardless of the query.
+        let base_query: Option<Box<dyn Query>> = if query == "*" || query.is_empty() {
+            None
         } else {
-            BooleanQuery::new(vec![(Occur::Should, base_query)])
+            Some(self.query_parser.parse_query(query)?)
         };
 
-        self.run_query(&full_query, max_number_of_results, pagination_offset)
+        let room_filter_query: Option<Box<dyn Query>> = match room_id_filter {
+            Some(room_id) => {
+                let room_term =
+                    Term::from_field_text(self.schema.target_room_id_key(), room_id.as_str());
+                Some(Box::new(TermQuery::new(room_term, IndexRecordOption::Basic)))
+            }
+            None => None,
+        };
+
+        let full_query: Box<dyn Query> = match (base_query, room_filter_query) {
+            (Some(base), Some(room_filter)) => {
+                Box::new(BooleanQuery::new(vec![(Occur::Must, base), (Occur::Must, room_filter)]))
+            }
+            (Some(base), None) => base,
+            (None, Some(room_filter)) => room_filter,
+            (None, None) => Box::new(AllQuery),
+        };
+
+        self.run_query(full_query.as_ref(), max_number_of_results, pagination_offset)
     }
 
     /// Run a tantivy [`Query`] and reconstruct the matching
