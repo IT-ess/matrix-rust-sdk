@@ -41,10 +41,6 @@ pub enum IndexError {
     #[error(transparent)]
     IndexWriteError(IndexWriteError),
 
-    /// Bookmarks index error
-    #[error(transparent)]
-    BookmarkIndexError(BookmarkIndexError),
-
     /// Message Type Error
     #[error("Message type not supported")]
     MessageTypeNotSupported,
@@ -127,22 +123,5 @@ pub enum IndexWriteError {
 impl From<tantivy::TantivyError> for IndexWriteError {
     fn from(err: tantivy::TantivyError) -> IndexWriteError {
         IndexWriteError::TantivyError(err)
-    }
-}
-
-/// Internal representation of Bookmarks index related errors.
-#[derive(Error, Debug)]
-pub enum BookmarkIndexError {
-    /// Tantivy Error
-    #[error(transparent)]
-    TantivyError(tantivy::TantivyError),
-    /// Data is missing from the bookmarked event or the bookmark itself
-    #[error("Missing data to save bookmark")]
-    MissingData,
-}
-
-impl From<tantivy::TantivyError> for BookmarkIndexError {
-    fn from(err: tantivy::TantivyError) -> BookmarkIndexError {
-        BookmarkIndexError::TantivyError(err)
     }
 }

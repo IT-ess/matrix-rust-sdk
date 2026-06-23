@@ -270,8 +270,7 @@ impl RoomIndex {
                 // Ignore
                 IndexError::CannotIndexRedactedMessage
                 | IndexError::EmptyMessage
-                | IndexError::MessageTypeNotSupported
-                | IndexError::BookmarkIndexError(_) => break,
+                | IndexError::MessageTypeNotSupported => break,
             }
             debug!("Failed to execute operation in room index (try {num_tries}): {err}");
         }

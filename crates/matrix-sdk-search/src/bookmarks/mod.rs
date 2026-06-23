@@ -251,25 +251,11 @@ impl BookmarkIndex {
         self.run_query(&query, max_number_of_results, None)
     }
 
-    /// Find all indexed bookmarks whose deletion key (the original/root event
-    /// id of the bookmark event) matches the given event id.
-    fn find_by_original_event_id(
-        &self,
-        original_event_id: &EventId,
-        max_number_of_results: usize,
-    ) -> Result<Vec<IndexedBookmark>, IndexError> {
-        self.find_by_event_id_field(
-            self.schema.deletion_key(),
-            original_event_id,
-            max_number_of_results,
-        )
-    }
-
     fn get_events_to_be_removed(
         &self,
         event_id: &EventId,
     ) -> Result<Vec<IndexedBookmark>, IndexError> {
-        self.find_by_original_event_id(event_id, 10000)
+        self.find_by_event_id_field(self.schema.deletion_key(), event_id, 10000)
     }
 
     fn add(
@@ -278,12 +264,12 @@ impl BookmarkIndex {
         pointer_info: BookmarkPointerInfo,
         bookmark_content: IndexedBookmarkContent,
     ) -> Result<(), IndexError> {
-        let current_version_event_id = pointer_info.event_id.clone();
-        if !self.contains(&current_version_event_id) {
+        let event_id = pointer_info.event_id.clone();
+        if !self.contains(&event_id) {
             writer.add(self.schema.make_doc(pointer_info, bookmark_content)?)?;
         }
-        self.uncommitted_removes.remove(&current_version_event_id);
-        self.uncommitted_adds.insert(current_version_event_id);
+        self.uncommitted_removes.remove(&event_id);
+        self.uncommitted_adds.insert(event_id);
         Ok(())
     }
 
@@ -380,9 +366,7 @@ impl BookmarkIndex {
                     | OpenDirectoryError::NotADirectory(_) => return Err(err),
                 },
                 // Bubble
-                IndexError::QueryParserError(_)
-                | IndexError::BookmarkIndexError(_)
-                | IndexError::IdParsing => {
+                IndexError::QueryParserError(_) | IndexError::IdParsing => {
                     return Err(err);
                 }
                 // Ignore
