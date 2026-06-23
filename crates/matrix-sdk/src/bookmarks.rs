@@ -29,6 +29,7 @@ use ruma::{
     events::{
         bookmark::{BookmarkEventContent, PointerContentBlock},
         bookmarks_room::BookmarksRoomEventContent,
+        relation::RelationType,
     },
     serde::Raw,
 };
@@ -163,7 +164,16 @@ impl BookmarkSearchIterator {
         };
         let mut results = Vec::new();
         for bookmark in indexed_bookmarks {
-            results.push(self.room.load_or_fetch_event(&bookmark.target_event_id, None).await?);
+            let (original_event, mut replacements) = self
+                .room
+                .load_or_fetch_event_with_relations(
+                    &bookmark.target_event_id,
+                    Some(vec![RelationType::Replacement]),
+                    None,
+                )
+                .await?;
+
+            results.push(replacements.pop().unwrap_or(original_event));
         }
         Ok(Some(results))
     }
