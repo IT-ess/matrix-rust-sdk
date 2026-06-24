@@ -5118,6 +5118,7 @@ dependencies = [
 [[package]]
 name = "ruma"
 version = "0.16.0"
+source = "git+https://github.com/IT-ess/ruma?branch=msc4482-bookmarks#5a4a8525a0934da68ca08d3ffb82223c0d61d9bb"
 dependencies = [
  "assign",
  "js_int",
@@ -5135,6 +5136,7 @@ dependencies = [
 [[package]]
 name = "ruma-client-api"
 version = "0.24.0"
+source = "git+https://github.com/IT-ess/ruma?branch=msc4482-bookmarks#5a4a8525a0934da68ca08d3ffb82223c0d61d9bb"
 dependencies = [
  "as_variant",
  "assign",
@@ -5156,6 +5158,7 @@ dependencies = [
 [[package]]
 name = "ruma-common"
 version = "0.19.0"
+source = "git+https://github.com/IT-ess/ruma?branch=msc4482-bookmarks#5a4a8525a0934da68ca08d3ffb82223c0d61d9bb"
 dependencies = [
  "as_variant",
  "base64",
@@ -5188,6 +5191,7 @@ dependencies = [
 [[package]]
 name = "ruma-events"
 version = "0.34.0"
+source = "git+https://github.com/IT-ess/ruma?branch=msc4482-bookmarks#5a4a8525a0934da68ca08d3ffb82223c0d61d9bb"
 dependencies = [
  "as_variant",
  "indexmap",
@@ -5210,6 +5214,7 @@ dependencies = [
 [[package]]
 name = "ruma-federation-api"
 version = "0.15.0"
+source = "git+https://github.com/IT-ess/ruma?branch=msc4482-bookmarks#5a4a8525a0934da68ca08d3ffb82223c0d61d9bb"
 dependencies = [
  "headers",
  "http",
@@ -5230,6 +5235,7 @@ dependencies = [
 [[package]]
 name = "ruma-html"
 version = "0.8.0"
+source = "git+https://github.com/IT-ess/ruma?branch=msc4482-bookmarks#5a4a8525a0934da68ca08d3ffb82223c0d61d9bb"
 dependencies = [
  "as_variant",
  "html5ever",
@@ -5240,6 +5246,7 @@ dependencies = [
 [[package]]
 name = "ruma-identifiers-validation"
 version = "0.12.1"
+source = "git+https://github.com/IT-ess/ruma?branch=msc4482-bookmarks#5a4a8525a0934da68ca08d3ffb82223c0d61d9bb"
 dependencies = [
  "js_int",
  "thiserror 2.0.18",
@@ -5248,6 +5255,7 @@ dependencies = [
 [[package]]
 name = "ruma-macros"
 version = "0.19.0"
+source = "git+https://github.com/IT-ess/ruma?branch=msc4482-bookmarks#5a4a8525a0934da68ca08d3ffb82223c0d61d9bb"
 dependencies = [
  "as_variant",
  "cfg-if",
@@ -5263,6 +5271,7 @@ dependencies = [
 [[package]]
 name = "ruma-signatures"
 version = "0.21.0"
+source = "git+https://github.com/IT-ess/ruma?branch=msc4482-bookmarks#5a4a8525a0934da68ca08d3ffb82223c0d61d9bb"
 dependencies = [
  "base64",
  "ed25519-dalek",

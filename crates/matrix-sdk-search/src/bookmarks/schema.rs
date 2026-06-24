@@ -43,13 +43,13 @@ pub(crate) trait MatrixBookmarkIndexSchema {
 
 #[derive(Debug, Clone)]
 /// A struct that represents the fields of the original
-/// event that will be indexed.
+/// bookmarked event that will be indexed.
 pub struct IndexedBookmarkContent {
     /// Plain text content of the bookmarked event.
     /// The content of this field will be indexed.
-    /// It may be None if the bookmarked event does
-    /// not have suitable text fields to pass.
-    pub(super) body: Option<String>,
+    /// It cannot be empty otherwise the index won't
+    /// save it.
+    pub(super) body: String,
     /// Timestamp when the bookmarked event has been
     /// sent.
     pub(super) date: MilliSecondsSinceUnixEpoch,
@@ -60,11 +60,7 @@ pub struct IndexedBookmarkContent {
 
 impl IndexedBookmarkContent {
     /// Create a new IndexedBookmarkContent
-    pub fn new(
-        body: Option<String>,
-        date: MilliSecondsSinceUnixEpoch,
-        sender: OwnedUserId,
-    ) -> Self {
+    pub fn new(body: String, date: MilliSecondsSinceUnixEpoch, sender: OwnedUserId) -> Self {
         Self { body, date, sender }
     }
 }
@@ -72,22 +68,27 @@ impl IndexedBookmarkContent {
 impl From<OriginalSyncRoomMessageEvent> for IndexedBookmarkContent {
     fn from(value: OriginalSyncRoomMessageEvent) -> Self {
         let body = match value.content.msgtype {
-            MessageType::Text(content) => Some(content.body),
-            MessageType::Notice(content) => Some(content.body),
-            MessageType::Emote(content) => Some(content.body),
-            MessageType::Audio(ref content) if let Some(caption) = content.caption() => {
-                Some(caption.to_owned())
+            MessageType::Audio(content) => {
+                content.caption().map(ToOwned::to_owned).unwrap_or(content.filename().to_owned())
             }
-            MessageType::File(ref content) if let Some(caption) = content.caption() => {
-                Some(caption.to_owned())
+            MessageType::Emote(content) => content.body,
+            MessageType::File(content) => {
+                content.caption().map(ToOwned::to_owned).unwrap_or(content.filename().to_owned())
             }
-            MessageType::Image(ref content) if let Some(caption) = content.caption() => {
-                Some(caption.to_owned())
+            MessageType::Gallery(content) => content.body,
+            MessageType::Image(content) => {
+                content.caption().map(ToOwned::to_owned).unwrap_or(content.filename().to_owned())
             }
-            MessageType::Video(ref content) if let Some(caption) = content.caption() => {
-                Some(caption.to_owned())
+            MessageType::Location(content) => content.body,
+            MessageType::Notice(content) => content.body,
+            MessageType::ServerNotice(content) => content.body,
+            MessageType::Text(content) => content.body,
+            MessageType::Video(content) => {
+                content.caption().map(ToOwned::to_owned).unwrap_or(content.filename().to_owned())
             }
-            _ => None,
+            // The index needs some body to allow indexing, so we fallback on the msgtype. This
+            // is not ideal but this allows bookmarking any MessageLike timeline event.
+            _message => _message.msgtype().to_owned(),
         };
 
         Self { body, date: value.origin_server_ts, sender: value.sender }
@@ -181,7 +182,7 @@ impl MatrixBookmarkIndexSchema for BookmarkSchema {
             self.original_event_id_field => pointer_info.original_event_id.to_string(),
             self.target_event_id_field => pointer_info.target_event_id.to_string(),
             self.target_room_id_field => pointer_info.target_room_id.to_string(),
-            self.body_field => bookmark_content.body.unwrap_or("".to_owned()),
+            self.body_field => bookmark_content.body,
             self.date_field =>
                 DateTime::from_timestamp_millis(
                     bookmark_content.date.get().into()),

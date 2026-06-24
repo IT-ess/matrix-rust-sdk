@@ -230,8 +230,7 @@ impl BookmarkIndexGuard<'_> {
 
 /// Given an event id this function returns the most recent edit on said event
 /// or the event itself if there are no edits.
-/// If a Client is provided, this function will try to fetch the event if it
-/// hasn't been found.
+/// This function will try to fetch the event if it hasn't been found locally.
 async fn get_most_recent_timeline_event_edit(
     target_room_cache: &RoomEventCache,
     original: &EventId,
@@ -268,8 +267,8 @@ async fn get_most_recent_timeline_event_edit(
     }
 }
 
-/// Fetch the referenced bookmarked event and return a
-/// [`BookmarkIndexOperation::Add`].
+/// Fetch the referenced bookmarked event and return a [`BookmarkIndexOperation`]
+/// depending on the values of the bookmark and the target events.
 async fn handle_sync_bookmark(
     bookmark_event: SyncBookmarkEvent,
     client: &Client,
@@ -328,8 +327,8 @@ async fn handle_possible_edit(
     None
 }
 
-/// Return a [`BookmarkIndexOperation::Remove`] or nothing
-/// depending on the message.
+/// Return a [`BookmarkIndexOperation::Remove`], [`BookmarkIndexOperation::Edit`]
+/// or nothing.
 async fn handle_bookmark_redaction(
     event: SyncRoomRedactionEvent,
     cache: &RoomEventCache,
@@ -417,9 +416,7 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        panic!(
-            "timed out waiting for the bookmark of {expected_target_event_id} to be indexed"
-        );
+        panic!("timed out waiting for the bookmark of {expected_target_event_id} to be indexed");
     }
 
     /// Like [`wait_for_bookmark`], but waits until at least `count` bookmarks

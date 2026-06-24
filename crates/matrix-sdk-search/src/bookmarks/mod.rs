@@ -585,7 +585,7 @@ mod tests {
             target_event_id: pointer_event_id,
         };
         let content = IndexedBookmarkContent::new(
-            Some(body.to_owned()),
+            body.to_owned(),
             MilliSecondsSinceUnixEpoch(uint!(0)),
             owned_user_id!("@alice:example.org"),
         );
@@ -666,9 +666,6 @@ mod tests {
             results[0].score,
             results[1].score,
         );
-
-        println!("SCORE 1: {}", results[0].score);
-        println!("SCORE 2: {}", results[1].score);
     }
 
     /// A rarer term carries more weight (higher IDF) than a term present in
@@ -819,7 +816,7 @@ mod tests {
             target_event_id: target_event_id.clone(),
         };
         let content = IndexedBookmarkContent::new(
-            Some("hello world".to_owned()),
+            "hello world".to_owned(),
             MilliSecondsSinceUnixEpoch(uint!(0)),
             owned_user_id!("@alice:example.org"),
         );
