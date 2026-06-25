@@ -175,6 +175,7 @@ impl EmbeddedEvent {
                             thread_root,
                             in_reply_to,
                             thread_summary,
+                            bookmarked: false,
                         }))
                     }
 

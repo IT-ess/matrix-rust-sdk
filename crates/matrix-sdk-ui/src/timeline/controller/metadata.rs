@@ -50,6 +50,9 @@ use crate::{
     unable_to_decrypt_hook::UtdHookManager,
 };
 
+#[cfg(feature = "experimental-bookmarks")]
+use std::collections::HashSet;
+
 /// All parameters to [`TimelineAction::from_content`] that only apply if an
 /// event is a remote echo.
 pub(crate) struct RemoteEventContext<'a> {
@@ -127,6 +130,15 @@ pub(in crate::timeline) struct TimelineMetadata {
     ///
     /// TODO: move this over to the event cache (see also #3058).
     pub(super) read_receipts: ReadReceipts,
+
+    /// The set of (root) event ids that are currently bookmarked in this room.
+    ///
+    /// This is used to efficiently set the `bookmarked` flag on message-like
+    /// timeline items, with O(1) lookups, without querying the bookmark index
+    /// per item. It is loaded once when the timeline is initialized and kept up
+    /// to date when bookmarks are added/removed locally.
+    #[cfg(feature = "experimental-bookmarks")]
+    pub(in crate::timeline) bookmarked_events: HashSet<OwnedEventId>,
 }
 
 impl TimelineMetadata {
@@ -148,6 +160,8 @@ impl TimelineMetadata {
             // field, otherwise we'll keep on exiting early in `Self::update_read_marker`.
             has_up_to_date_read_marker_item: true,
             read_receipts: Default::default(),
+            #[cfg(feature = "experimental-bookmarks")]
+            bookmarked_events: Default::default(),
             room_version_rules,
             unable_to_decrypt_hook,
             internal_id_prefix,

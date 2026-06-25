@@ -948,6 +948,7 @@ mod tests {
             thread_root: None,
             in_reply_to: None,
             thread_summary: None,
+            bookmarked: false,
         })
     }
 
@@ -963,6 +964,7 @@ mod tests {
             thread_root: None,
             in_reply_to: None,
             thread_summary: None,
+            bookmarked: false,
         })
     }
 

@@ -53,6 +53,10 @@ pub enum IndexError {
     #[error("Cannot index empty message")]
     EmptyMessage,
 
+    /// Parsing error of a MatrixId
+    #[error("Error while parsing MatrixId")]
+    IdParsing,
+
     /// IO error
     #[error(transparent)]
     IO(std::io::Error),

@@ -14,6 +14,10 @@ version = "0.18.0"
 all-features = true
 rustdoc-args = ["--cfg", "docsrs", "--generate-link-to-definition"]
 
+[features]
+experimental-bookmarks = ["ruma/unstable-msc4482"]
+unstable-msc4274 = ["ruma/unstable-msc4274"]
+
 [dependencies]
 aes = { version = "0.8.4", default-features = false }
 byteorder.workspace = true

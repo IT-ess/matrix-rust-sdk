@@ -81,6 +81,10 @@ pub struct MsgLikeContent {
     pub thread_root: Option<OwnedEventId>,
     /// Information about the thread this message is the root of, if any.
     pub thread_summary: Option<ThreadSummary>,
+    /// Whether this event is currently bookmarked (as defined by [MSC4482]).
+    ///
+    /// [MSC4482]: <https://github.com/matrix-org/matrix-spec-proposals/pull/4482>
+    pub bookmarked: bool,
 }
 
 impl MsgLikeContent {
@@ -104,6 +108,7 @@ impl MsgLikeContent {
             thread_root: None,
             in_reply_to: None,
             thread_summary: None,
+            bookmarked: false,
         }
     }
 
@@ -114,6 +119,7 @@ impl MsgLikeContent {
             thread_root: None,
             in_reply_to: None,
             thread_summary: None,
+            bookmarked: false,
         }
     }
 
@@ -128,6 +134,12 @@ impl MsgLikeContent {
 
     pub fn with_kind(&self, kind: MsgLikeKind) -> Self {
         Self { kind, ..self.clone() }
+    }
+
+    /// Returns a copy of this content with the `bookmarked` flag set to the
+    /// given value.
+    pub fn with_bookmarked(&self, bookmarked: bool) -> Self {
+        Self { bookmarked, ..self.clone() }
     }
 
     /// If `kind` is of the [`MsgLikeKind`][MsgLikeKind::Message] variant,

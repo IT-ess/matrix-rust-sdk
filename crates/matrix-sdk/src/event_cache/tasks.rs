@@ -505,18 +505,60 @@ pub(super) async fn search_indexing_task(
                 };
                 let redaction_rules = room.clone_info().room_version_rules_or_default().redaction;
 
-                let mut search_index_guard = client.search_index().lock().await;
-
-                if let Err(err) = search_index_guard
-                    .bulk_handle_timeline_event(
-                        timeline_events,
-                        &room_cache,
-                        &room_id,
-                        &redaction_rules,
-                    )
-                    .await
+                #[cfg(feature = "experimental-bookmarks")]
                 {
-                    error!("Failed to handle events for indexing: {err}")
+                    use ruma::room::RoomType;
+
+                    if let Some(RoomType::Bookmarks) = room.room_type() {
+                        let mut bookmark_index_guard = client.bookmark_index().lock().await;
+
+                        if let Err(err) = bookmark_index_guard
+                            .bulk_handle_bookmark_event(
+                                timeline_events,
+                                &client,
+                                &room_cache,
+                                &redaction_rules,
+                            )
+                            .await
+                        {
+                            error!(
+                                "Failed to handle events from the bookmarks room for indexing: {err}"
+                            )
+                        }
+                    } else {
+                        let mut search_index_guard = client.search_index().lock().await;
+
+                        if let Err(err) = search_index_guard
+                            .bulk_handle_timeline_event(
+                                timeline_events,
+                                &room_cache,
+                                &room_id,
+                                &redaction_rules,
+                                &client,
+                            )
+                            .await
+                        {
+                            error!("Failed to handle events for indexing: {err}")
+                        }
+                    }
+                }
+
+                #[cfg(not(feature = "experimental-bookmarks"))]
+                {
+                    let mut search_index_guard = client.search_index().lock().await;
+
+                    #[cfg(not(feature = "experimental-bookmarks"))]
+                    if let Err(err) = search_index_guard
+                        .bulk_handle_timeline_event(
+                            timeline_events,
+                            &room_cache,
+                            &room_id,
+                            &redaction_rules,
+                        )
+                        .await
+                    {
+                        error!("Failed to handle events for indexing: {err}")
+                    }
                 }
             }
             Err(RecvError::Closed) => {
@@ -529,5 +571,28 @@ pub(super) async fn search_indexing_task(
                 warn!(num_skipped, "Lagged behind linked chunk updates");
             }
         }
+    }
+}
+
+#[cfg(feature = "experimental-bookmarks")]
+use crate::event_cache::AutomaticPagination;
+
+/// Retrieves the active bookmarks room id and trigger an
+/// automatic back-pagination request if it exists.
+///
+/// This is a one-shot task that should be triggered on each
+/// client launch.
+#[cfg(feature = "experimental-bookmarks")]
+pub(super) async fn bookmarks_room_crawl_task(
+    client: WeakClient,
+    auto_pagination_handle: AutomaticPagination,
+) {
+    let Some(client) = client.get() else {
+        trace!("Client is shutting down, exiting bookmarks crawl task");
+        return;
+    };
+
+    if let Ok(Some(bookmarks_room_id)) = client.account().get_bookmarks_room_id().await {
+        auto_pagination_handle.run_once(&bookmarks_room_id);
     }
 }

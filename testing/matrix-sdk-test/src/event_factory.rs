@@ -555,6 +555,12 @@ impl EventBuilder<RoomCreateEventContent> {
         self.content.room_type = Some(RoomType::Space);
         self
     }
+
+    /// Sets the `m.room.create` `type` field to the bookmarks room type.
+    pub fn with_bookmarks_type(mut self) -> Self {
+        self.content.room_type = Some(RoomType::Bookmarks);
+        self
+    }
 }
 
 impl EventBuilder<StickerEventContent> {

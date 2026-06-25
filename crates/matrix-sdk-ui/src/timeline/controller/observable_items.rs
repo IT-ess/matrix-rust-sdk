@@ -747,6 +747,7 @@ mod observable_items_tests {
                     thread_root: None,
                     in_reply_to: None,
                     thread_summary: None,
+                    bookmarked: false,
                 }),
                 EventTimelineItemKind::Remote(RemoteEventTimelineItem {
                     event_id: event_id.parse().unwrap(),
@@ -783,6 +784,7 @@ mod observable_items_tests {
                     thread_root: None,
                     in_reply_to: None,
                     thread_summary: None,
+                    bookmarked: false,
                 }),
                 EventTimelineItemKind::Local(LocalEventTimelineItem {
                     send_state: EventSendState::NotSentYet { progress: None },

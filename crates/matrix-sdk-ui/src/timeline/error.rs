@@ -75,6 +75,29 @@ pub enum Error {
     /// An error happened while attempting to redact an event.
     #[error(transparent)]
     RedactError(#[from] RedactError),
+
+    /// An error happened while attempting to bookmark or unbookmark an event.
+    #[cfg(feature = "experimental-bookmarks")]
+    #[error(transparent)]
+    BookmarkError(#[from] BookmarkError),
+}
+
+/// Errors that can happen when bookmarking or unbookmarking an event.
+#[cfg(feature = "experimental-bookmarks")]
+#[derive(Error, Debug)]
+pub enum BookmarkError {
+    /// The event can't be (un)bookmarked because it's a local echo that hasn't
+    /// been sent to the server yet.
+    #[error("Can't bookmark a local echo that hasn't been sent yet")]
+    LocalEcho,
+
+    /// The event isn't bookmarked, so it can't be unbookmarked.
+    #[error("The event isn't bookmarked")]
+    NotBookmarked,
+
+    /// An error happened at the SDK level.
+    #[error(transparent)]
+    SdkError(#[from] matrix_sdk::Error),
 }
 
 #[derive(Error, Debug)]

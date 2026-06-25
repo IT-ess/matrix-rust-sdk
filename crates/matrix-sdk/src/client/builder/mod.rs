@@ -49,6 +49,8 @@ use tokio::sync::OnceCell;
 use tracing::{Span, debug, field::debug, instrument};
 
 use super::{Client, ClientInner};
+#[cfg(feature = "experimental-bookmarks")]
+use crate::bookmark_index::{BookmarkIndexStore, BookmarkIndexStoreKind};
 #[cfg(feature = "e2e-encryption")]
 use crate::encryption::EncryptionSettings;
 #[cfg(not(target_family = "wasm"))]
@@ -131,6 +133,8 @@ pub struct ClientBuilder {
     threading_support: ThreadingSupport,
     #[cfg(feature = "experimental-search")]
     search_index_store_kind: SearchIndexStoreKind,
+    #[cfg(feature = "experimental-bookmarks")]
+    bookmark_index_store_kind: BookmarkIndexStoreKind,
     dm_room_definition: DmRoomDefinition,
     media_fetcher: Arc<dyn MediaFetcher>,
 }
@@ -169,6 +173,8 @@ impl ClientBuilder {
             threading_support: ThreadingSupport::Disabled,
             #[cfg(feature = "experimental-search")]
             search_index_store_kind: SearchIndexStoreKind::InMemory,
+            #[cfg(feature = "experimental-bookmarks")]
+            bookmark_index_store_kind: BookmarkIndexStoreKind::InMemory,
             dm_room_definition: DmRoomDefinition::MatrixSpec,
             media_fetcher: Arc::new(DefaultMediaFetcher),
         }
@@ -545,6 +551,13 @@ impl ClientBuilder {
         self
     }
 
+    /// The base directory in which each bookmarks index directory will be stored.
+    #[cfg(feature = "experimental-bookmarks")]
+    pub fn bookmark_index_store(mut self, kind: BookmarkIndexStoreKind) -> Self {
+        self.bookmark_index_store_kind = kind;
+        self
+    }
+
     /// Create a [`Client`] with the options set on this builder.
     ///
     /// # Errors
@@ -643,6 +656,10 @@ impl ClientBuilder {
         let search_index =
             SearchIndex::new(Arc::new(Mutex::new(HashMap::new())), self.search_index_store_kind);
 
+        #[cfg(feature = "experimental-bookmarks")]
+        let bookmark_index =
+            BookmarkIndexStore::new(Arc::new(Mutex::new(None)), self.bookmark_index_store_kind);
+
         let inner = ClientInner::new(
             auth_ctx,
             server,
@@ -663,6 +680,8 @@ impl ClientBuilder {
             self.cross_process_lock_config,
             #[cfg(feature = "experimental-search")]
             search_index,
+            #[cfg(feature = "experimental-bookmarks")]
+            bookmark_index,
             thread_subscriptions_catchup,
             self.media_fetcher.clone(),
         )

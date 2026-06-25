@@ -161,6 +161,14 @@ impl Room {
         self.info.read().room_type().is_some_and(|t| *t == RoomType::Call)
     }
 
+    /// Whether this room is a Bookmarks room as defined by [MSC4482].
+    ///
+    /// [MSC4482]: <https://github.com/matrix-org/matrix-spec-proposals/pull/4482>
+    #[cfg(feature = "experimental-bookmarks")]
+    pub fn is_bookmarks(&self) -> bool {
+        self.info.read().room_type().is_some_and(|t| *t == RoomType::Bookmarks)
+    }
+
     /// Returns the room's type as defined in its creation event
     /// (`m.room.create`).
     pub fn room_type(&self) -> Option<RoomType> {

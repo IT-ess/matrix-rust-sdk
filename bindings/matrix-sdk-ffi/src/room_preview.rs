@@ -163,6 +163,8 @@ pub enum RoomType {
     Room,
     /// It's a space that can group several rooms.
     Space,
+    /// It's a bookmark room that shouldn't be displayed in the regular room list
+    Bookmarks,
     /// It's a custom implementation.
     Custom { value: String },
 }
@@ -171,6 +173,7 @@ impl From<Option<RumaRoomType>> for RoomType {
     fn from(value: Option<RumaRoomType>) -> Self {
         match value {
             Some(RumaRoomType::Space) => RoomType::Space,
+            Some(RumaRoomType::Bookmarks) => RoomType::Bookmarks,
             Some(RumaRoomType::_Custom(_)) => RoomType::Custom {
                 // SAFETY: this was checked in the match branch above
                 value: value.unwrap().to_string(),

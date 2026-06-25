@@ -63,6 +63,8 @@ use super::RoomListItem;
 
 mod all;
 mod any;
+#[cfg(feature = "experimental-bookmarks")]
+mod bookmarks;
 mod category;
 mod deduplicate_versions;
 mod favourite;
@@ -96,6 +98,9 @@ pub use self::{
     space::new_filter as new_filter_space,
     unread::new_filter as new_filter_unread,
 };
+
+#[cfg(feature = "experimental-bookmarks")]
+pub use self::bookmarks::new_filter as new_filter_bookmarks;
 
 /// A trait “alias” that represents a _filter_.
 ///

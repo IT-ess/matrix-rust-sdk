@@ -408,6 +408,10 @@ pub struct RoomListItem {
     /// Cache of `Room::is_space`.
     pub(super) cached_is_space: bool,
 
+    #[cfg(feature = "experimental-bookmarks")]
+    /// Cache of `Room::is_bookmarks`.
+    pub(super) cached_is_bookmarks: bool,
+
     // Cache of `Room::state`.
     pub(super) cached_state: RoomState,
 }
@@ -425,6 +429,10 @@ impl RoomListItem {
         self.cached_recency_stamp = self.inner.recency_stamp();
         self.cached_display_name = self.inner.cached_display_name().map(|name| name.to_string());
         self.cached_is_space = self.inner.is_space();
+        #[cfg(feature = "experimental-bookmarks")]
+        {
+            self.cached_is_bookmarks = self.inner.is_bookmarks();
+        }
         self.cached_state = self.inner.state();
     }
 }
@@ -436,6 +444,8 @@ impl From<Room> for RoomListItem {
         let cached_recency_stamp = inner.recency_stamp();
         let cached_display_name = inner.cached_display_name().map(|name| name.to_string());
         let cached_is_space = inner.is_space();
+        #[cfg(feature = "experimental-bookmarks")]
+        let cached_is_bookmarks = inner.is_bookmarks();
         let cached_state = inner.state();
 
         Self {
@@ -445,6 +455,8 @@ impl From<Room> for RoomListItem {
             cached_recency_stamp,
             cached_display_name,
             cached_is_space,
+            #[cfg(feature = "experimental-bookmarks")]
+            cached_is_bookmarks,
             cached_state,
         }
     }

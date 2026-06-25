@@ -67,6 +67,11 @@ pub mod widget;
 #[cfg(feature = "experimental-search")]
 pub mod message_search;
 
+#[cfg(feature = "experimental-bookmarks")]
+pub mod bookmark_index;
+#[cfg(feature = "experimental-bookmarks")]
+pub mod bookmarks;
+
 pub use account::Account;
 pub use authentication::{AuthApi, AuthSession, SessionTokens};
 pub use client::homeserver_capabilities::HomeserverCapabilities;

@@ -11,7 +11,6 @@ rust-version.workspace = true
 rustdoc-args = ["--generate-link-to-definition"]
 
 [features]
-default = []
 js = ["matrix-sdk/js"]
 uniffi = ["dep:uniffi", "matrix-sdk/uniffi", "matrix-sdk-base/uniffi"]
 
@@ -27,6 +26,8 @@ experimental-encrypted-state-events = [
     "matrix-sdk-base/experimental-encrypted-state-events",
     "ruma/unstable-msc4362"
 ]
+
+experimental-bookmarks = ["ruma/unstable-msc4482", "matrix-sdk/experimental-bookmarks"]
 
 [dependencies]
 as_variant.workspace = true

@@ -5118,8 +5118,7 @@ dependencies = [
 [[package]]
 name = "ruma"
 version = "0.16.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee4fe5bfacdb0e95e733da3b6c37d98edf46447a4a8e8dea824e0da266d8ad59"
+source = "git+https://github.com/IT-ess/ruma?branch=msc4482-bookmarks#5a4a8525a0934da68ca08d3ffb82223c0d61d9bb"
 dependencies = [
  "assign",
  "js_int",
@@ -5137,8 +5136,7 @@ dependencies = [
 [[package]]
 name = "ruma-client-api"
 version = "0.24.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf7ca43a888ca569168d7e3901f4dd14a777b860bb19f4c08e35414162eb261c"
+source = "git+https://github.com/IT-ess/ruma?branch=msc4482-bookmarks#5a4a8525a0934da68ca08d3ffb82223c0d61d9bb"
 dependencies = [
  "as_variant",
  "assign",
@@ -5160,8 +5158,7 @@ dependencies = [
 [[package]]
 name = "ruma-common"
 version = "0.19.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2c3b4f00112791b490acce57df1ce3eb3f88899b045bebcff8a29f75369640cc"
+source = "git+https://github.com/IT-ess/ruma?branch=msc4482-bookmarks#5a4a8525a0934da68ca08d3ffb82223c0d61d9bb"
 dependencies = [
  "as_variant",
  "base64",
@@ -5194,8 +5191,7 @@ dependencies = [
 [[package]]
 name = "ruma-events"
 version = "0.34.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "85d2f90830fc131691349b96a69ff53444eb6c3e8dc7869c77961b43cfaf3344"
+source = "git+https://github.com/IT-ess/ruma?branch=msc4482-bookmarks#5a4a8525a0934da68ca08d3ffb82223c0d61d9bb"
 dependencies = [
  "as_variant",
  "indexmap",
@@ -5218,8 +5214,7 @@ dependencies = [
 [[package]]
 name = "ruma-federation-api"
 version = "0.15.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d4c9638f18d8da3183ebdf034a552ba6d7e86d217e6e680eebaa97c4e8d13d1a"
+source = "git+https://github.com/IT-ess/ruma?branch=msc4482-bookmarks#5a4a8525a0934da68ca08d3ffb82223c0d61d9bb"
 dependencies = [
  "headers",
  "http",
@@ -5240,8 +5235,7 @@ dependencies = [
 [[package]]
 name = "ruma-html"
 version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "48d33a944650f4bbd2188dd204d39dd87a9a1498f14b3a13252910c90ed7cd43"
+source = "git+https://github.com/IT-ess/ruma?branch=msc4482-bookmarks#5a4a8525a0934da68ca08d3ffb82223c0d61d9bb"
 dependencies = [
  "as_variant",
  "html5ever",
@@ -5252,8 +5246,7 @@ dependencies = [
 [[package]]
 name = "ruma-identifiers-validation"
 version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d6cff00317675f487c4e7ccfb18875a14c5a14867b51d13f2a826053f03c432"
+source = "git+https://github.com/IT-ess/ruma?branch=msc4482-bookmarks#5a4a8525a0934da68ca08d3ffb82223c0d61d9bb"
 dependencies = [
  "js_int",
  "thiserror 2.0.18",
@@ -5262,8 +5255,7 @@ dependencies = [
 [[package]]
 name = "ruma-macros"
 version = "0.19.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c8cfb39eaa9b9fd389126ff941e060b496add5cbbfef559d80c46e571dda459c"
+source = "git+https://github.com/IT-ess/ruma?branch=msc4482-bookmarks#5a4a8525a0934da68ca08d3ffb82223c0d61d9bb"
 dependencies = [
  "as_variant",
  "cfg-if",
@@ -5279,8 +5271,7 @@ dependencies = [
 [[package]]
 name = "ruma-signatures"
 version = "0.21.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d374cdc542bcb881da80fcb3e58403e5fd17cfe5e0ab03939fdf12f99ef9ba2"
+source = "git+https://github.com/IT-ess/ruma?branch=msc4482-bookmarks#5a4a8525a0934da68ca08d3ffb82223c0d61d9bb"
 dependencies = [
  "base64",
  "ed25519-dalek",
