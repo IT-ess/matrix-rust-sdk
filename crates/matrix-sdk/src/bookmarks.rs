@@ -16,12 +16,12 @@
 //! bookmarks, or perform searches across one or multiple rooms, with
 //! pagination support.
 
-use matrix_sdk_base::deserialized_responses::TimelineEvent;
+use matrix_sdk_base::{RoomStateFilter, deserialized_responses::TimelineEvent};
 #[cfg(doc)]
 use matrix_sdk_search::bookmarks::BookmarkIndex;
 pub use matrix_sdk_search::{bookmarks::IndexedBookmark, error::IndexError};
 use ruma::{
-    EventId, OwnedEventId, RoomId,
+    EventId, OwnedEventId, OwnedRoomId,
     api::client::{
         redact::redact_event,
         room::create_room::{self, v3::CreationContent},
@@ -33,6 +33,7 @@ use ruma::{
     },
     serde::Raw,
 };
+use std::collections::HashSet;
 use tracing::error;
 
 use crate::{Client, Room, message_search::SearchError, room::futures::SendMessageLikeEventResult};
@@ -46,9 +47,8 @@ impl Room {
         max_number_of_results: usize,
         pagination_offset: Option<usize>,
     ) -> Result<Vec<IndexedBookmark>, IndexError> {
-        self.client
-            .search_bookmarks(query, max_number_of_results, pagination_offset, Some(self.room_id()))
-            .await
+        let mut index = self.client.bookmark_index().lock().await;
+        index.search(query, max_number_of_results, pagination_offset, Some(self.room_id()))
     }
 
     /// Search for bookmarks in this room matching the given query, returning an
@@ -73,13 +73,11 @@ impl Room {
     /// The returned event ids are the *original* (root of the `m.replace`
     /// relation chain) event ids, i.e. the ones that match a timeline item's
     /// own event id.
-    pub async fn bookmarked_event_ids(
-        &self,
-    ) -> Result<std::collections::HashSet<OwnedEventId>, IndexError> {
+    pub async fn bookmarked_event_ids(&self) -> Result<HashSet<OwnedEventId>, IndexError> {
         // Number of bookmarks to load per index query.
         const BATCH_SIZE: usize = 100;
 
-        let mut event_ids = std::collections::HashSet::new();
+        let mut event_ids = HashSet::new();
         let mut offset = 0;
 
         loop {
@@ -180,16 +178,14 @@ impl BookmarkSearchIterator {
 }
 
 impl Client {
-    /// Search across the global bookmarks index with the given query.
-    pub async fn search_bookmarks(
+    /// Search across the global bookmarks index for events with the given query,
+    /// returning a builder for an iterator over the results.
+    pub fn search_bookmarks(
         &self,
-        query: &str,
-        max_number_of_results: usize,
-        pagination_offset: Option<usize>,
-        room_id_filter: Option<&RoomId>,
-    ) -> Result<Vec<IndexedBookmark>, IndexError> {
-        let mut index = self.bookmark_index().lock().await;
-        index.search(query, max_number_of_results, pagination_offset, room_id_filter)
+        query: String,
+        num_results_per_batch: usize,
+    ) -> GlobalBookmarkSearchBuilder {
+        GlobalBookmarkSearchBuilder::new(self.clone(), query, num_results_per_batch)
     }
 
     /// Retrieve the bookmarks room
@@ -278,4 +274,205 @@ async fn create_bookmarks_room(client: &Client) -> crate::Result<Room> {
     }
 
     Ok(room)
+}
+
+#[derive(Debug)]
+struct GlobalBookmarkSearchRoomState {
+    /// The room for which we're storing state.
+    room: Room,
+
+    /// The current start offset in the search results for this room, or `None`
+    /// if we haven't called the iterator for this room yet.
+    offset: Option<usize>,
+}
+
+impl GlobalBookmarkSearchRoomState {
+    fn new(room: Room) -> Self {
+        Self { room, offset: None }
+    }
+}
+
+/// A builder for a [`GlobalSearchIterator`] that allows to configure the
+/// initial working set of rooms to search in.
+#[derive(Debug)]
+pub struct GlobalBookmarkSearchBuilder {
+    client: Client,
+
+    /// The search query, directly forwarded to the search API.
+    query: String,
+
+    /// Number of results to return (at most) per batch when calling
+    /// [`GlobalSearchIterator::next()`].
+    num_results_per_batch: usize,
+
+    /// The working set of rooms to search in.
+    room_set: Vec<Room>,
+}
+
+impl GlobalBookmarkSearchBuilder {
+    /// Create a new global search on all the joined rooms.
+    fn new(client: Client, query: String, num_results_per_batch: usize) -> Self {
+        let room_set = client.rooms_filtered(RoomStateFilter::JOINED);
+        Self { client, query, room_set, num_results_per_batch }
+    }
+
+    /// Keep only the DM rooms from the initial working set.
+    pub async fn only_dm_rooms(mut self) -> Result<Self, crate::Error> {
+        let mut to_remove = HashSet::new();
+        for room in &self.room_set {
+            if !room.compute_is_dm().await? {
+                to_remove.insert(room.room_id().to_owned());
+            }
+        }
+        self.room_set.retain(|room| !to_remove.contains(room.room_id()));
+        Ok(self)
+    }
+
+    /// Keep only non-DM rooms (groups) from the initial working set.
+    pub async fn no_dms(mut self) -> Result<Self, crate::Error> {
+        let mut to_remove = HashSet::new();
+        for room in &self.room_set {
+            if room.compute_is_dm().await? {
+                to_remove.insert(room.room_id().to_owned());
+            }
+        }
+        self.room_set.retain(|room| !to_remove.contains(room.room_id()));
+        Ok(self)
+    }
+
+    /// Build the [`GlobalSearchIterator`] from this builder.
+    pub fn build(self) -> GlobalBookmarkSearchIterator {
+        GlobalBookmarkSearchIterator {
+            client: self.client,
+            query: self.query,
+            room_state: Vec::from_iter(
+                self.room_set.into_iter().map(GlobalBookmarkSearchRoomState::new),
+            ),
+            current_batch: Vec::new(),
+            num_results_per_batch: self.num_results_per_batch,
+        }
+    }
+}
+
+/// An async iterator for a search query across multiple rooms.
+#[derive(Debug)]
+pub struct GlobalBookmarkSearchIterator {
+    client: Client,
+
+    /// The search query, directly forwarded to the search API.
+    query: String,
+
+    /// The state for each room in the working list, that may still have
+    /// results.
+    ///
+    /// This list is bound to shrink as we exhaust search results for each room,
+    /// until it's empty and the overall iteration is done.
+    room_state: Vec<GlobalBookmarkSearchRoomState>,
+
+    /// A buffer for the current batch of results across all rooms, sorted by
+    /// score descending so results are returned in relevance order.
+    current_batch: Vec<(f32, OwnedRoomId, IndexedBookmark)>,
+
+    /// Number of results to return (at most) per batch when calling
+    /// [`Self::next()`].
+    num_results_per_batch: usize,
+}
+
+impl GlobalBookmarkSearchIterator {
+    /// Return the next batch of event IDs matching the search query across all
+    /// rooms, or `None` if there are no more results.
+    pub async fn next(
+        &mut self,
+    ) -> Result<Option<Vec<(OwnedRoomId, IndexedBookmark)>>, SearchError> {
+        if self.room_state.is_empty() {
+            return Ok(None);
+        }
+
+        // If there was enough results from a previous room iteration, return them
+        // immediately (they're already sorted from the previous fill).
+        if self.current_batch.len() >= self.num_results_per_batch {
+            return Ok(Some(
+                self.current_batch
+                    .drain(0..self.num_results_per_batch)
+                    .map(|(_, room_id, event_id)| (room_id, event_id))
+                    .collect(),
+            ));
+        }
+
+        let mut to_remove = HashSet::new();
+
+        // Search across all non-done rooms for `num_results`, and accumulate them in
+        // `Self::current_batch`.
+        for room_state in &mut self.room_state {
+            let room_results = room_state
+                .room
+                .search_room_bookmarks(&self.query, self.num_results_per_batch, room_state.offset)
+                .await?;
+
+            if room_results.is_empty() {
+                // We've exhausted results for this room, mark it for removal.
+                to_remove.insert(room_state.room.room_id().to_owned());
+            } else {
+                // Move the start offset for the room forward.
+                room_state.offset = Some(room_state.offset.unwrap_or(0) + room_results.len());
+
+                // Append the search results to the current batch.
+                self.current_batch.extend(room_results.into_iter().map(|indexed_bookmark| {
+                    (indexed_bookmark.score, room_state.room.room_id().to_owned(), indexed_bookmark)
+                }));
+
+                if self.current_batch.len() >= self.num_results_per_batch {
+                    // We have enough events to return now.
+                    break;
+                }
+            }
+        }
+
+        // Delete rooms for which we've exhausted search results from the working list.
+        for room_id in to_remove {
+            self.room_state.retain(|room_state| room_state.room.room_id() != room_id);
+        }
+
+        if !self.current_batch.is_empty() {
+            // Sort by score descending so cross-room results are returned in relevance
+            // order.
+            self.current_batch.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
+            let high = self.num_results_per_batch.min(self.current_batch.len());
+            Ok(Some(
+                self.current_batch
+                    .drain(0..high)
+                    .map(|(_, room_id, indexed_bookmark)| (room_id, indexed_bookmark))
+                    .collect(),
+            ))
+        } else {
+            debug_assert!(self.room_state.is_empty());
+            Ok(None)
+        }
+    }
+
+    /// Returns [`TimelineEvent`]s instead of event IDs, by loading the events
+    /// from the store or from network.
+    pub async fn next_events(
+        &mut self,
+    ) -> Result<Option<Vec<(OwnedRoomId, TimelineEvent)>>, SearchError> {
+        let Some(bookmarks) = self.next().await? else {
+            return Ok(None);
+        };
+        let mut results = Vec::with_capacity(bookmarks.len());
+        for (room_id, bookmark) in bookmarks {
+            let Some(room) = self.client.get_room(&room_id) else {
+                continue;
+            };
+            let (original_event, mut replacements) = room
+                .load_or_fetch_event_with_relations(
+                    &bookmark.target_event_id,
+                    Some(vec![RelationType::Replacement]),
+                    None,
+                )
+                .await?;
+
+            results.push((room_id, replacements.pop().unwrap_or(original_event)));
+        }
+        Ok(Some(results))
+    }
 }

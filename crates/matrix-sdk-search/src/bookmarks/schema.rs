@@ -75,6 +75,7 @@ impl From<OriginalSyncRoomMessageEvent> for IndexedBookmarkContent {
             MessageType::File(content) => {
                 content.caption().map(ToOwned::to_owned).unwrap_or(content.filename().to_owned())
             }
+            #[cfg(feature = "unstable-msc4274")]
             MessageType::Gallery(content) => content.body,
             MessageType::Image(content) => {
                 content.caption().map(ToOwned::to_owned).unwrap_or(content.filename().to_owned())
